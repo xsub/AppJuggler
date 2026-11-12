@@ -55,7 +55,11 @@ class MacOSInputAdapter(InputAdapter):
       for `hold_assign_ms` (default 2000 ms) without blocking normal single/double taps.
     """
 
-    def __init__(self, hold_assign_ms: int = 2000) -> None:
+    def __init__(
+        self,
+        hold_assign_ms: int = 2000,
+        enable_caps_hold: bool = False,
+    ) -> None:
         initial_caps = self._read_current_caps_lock()
         self._decoder = KeyEventDecoder(initial_caps_on=initial_caps)
         self._decoder.refresh_from_system_layout()
@@ -74,7 +78,8 @@ class MacOSInputAdapter(InputAdapter):
         self._on_caps_hold: Callable[[], None] | None = None
         self._layout_observer: _LayoutChangeObserver | None = None
 
-        # Physical Caps Lock 2-second hold state
+        # Optional physical Caps Lock 2-second hold state (disabled by default)
+        self._enable_caps_hold: bool = bool(enable_caps_hold)
         self._hold_lock = threading.Lock()
         self._hold_assign_sec: float = max(0.5, min(5.0, hold_assign_ms / 1000.0))
         self._caps_hold_seq: int = 0
@@ -85,6 +90,15 @@ class MacOSInputAdapter(InputAdapter):
     def is_running(self) -> bool:
         with self._lock:
             return self._running and self._tap is not None
+
+    @property
+    def caps_hold_enabled(self) -> bool:
+        return self._enable_caps_hold
+
+    def set_caps_hold_enabled(self, enabled: bool) -> None:
+        self._enable_caps_hold = bool(enabled)
+        if not self._enable_caps_hold:
+            self._cancel_caps_hold_timer()
 
     @property
     def layout_description(self) -> str:
@@ -150,7 +164,11 @@ class MacOSInputAdapter(InputAdapter):
                     ready_event.set()
                     return
 
-                hid_cleanup = self._attach_iohid_caps_monitor()
+                hid_cleanup = (
+                    self._attach_iohid_caps_monitor()
+                    if (self._enable_caps_hold and self._on_caps_hold is not None)
+                    else None
+                )
 
                 with self._lock:
                     self._tap = tap
@@ -184,7 +202,13 @@ class MacOSInputAdapter(InputAdapter):
         ready_event.wait(timeout=2.0)
         if created_ok[0]:
             self._register_layout_observer()
-            logger.info("CGEventTap + IOHID Caps monitor started (layout=%s)", self._decoder.layout_description)
+            if self._enable_caps_hold and self._on_caps_hold is not None:
+                logger.info(
+                    "CGEventTap + IOHID Caps-hold monitor started (layout=%s)",
+                    self._decoder.layout_description,
+                )
+            else:
+                logger.info("CGEventTap started (layout=%s)", self._decoder.layout_description)
             return True
         return False
 
@@ -378,10 +402,11 @@ class MacOSInputAdapter(InputAdapter):
             )
             flags = int(Quartz.CGEventGetFlags(event))
 
-            # Any non-Caps key or modifier press cancels a pending 2-second Caps hold!
-            if keycode != VK_CAPS_LOCK and event_type in (
-                Quartz.kCGEventKeyDown,
-                Quartz.kCGEventFlagsChanged,
+            # Only run hold-cancellation check when optional 2s Caps-hold feature is enabled.
+            if (
+                self._enable_caps_hold
+                and keycode != VK_CAPS_LOCK
+                and event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventFlagsChanged)
             ):
                 self._cancel_caps_hold_timer()
 

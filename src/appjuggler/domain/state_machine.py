@@ -62,11 +62,13 @@ class NavigationController:
         trigger_interval_ms: int = 300,
         max_pending_inputs: int = 8,
         single_window_digit_guard_ms: int = 150,
+        enable_caps_hold_assign: bool = False,
     ) -> None:
         self._lock = threading.Lock()
         self._trigger_interval_ns: int = trigger_interval_ms * 1_000_000
         self._max_pending_inputs: int = max_pending_inputs
         self._single_window_digit_guard_ns: int = single_window_digit_guard_ms * 1_000_000
+        self._enable_caps_hold_assign: bool = bool(enable_caps_hold_assign)
 
         # Snapshots updated from BindingStore / ApplicationRegistry
         self._bindings: dict[tuple[str, Layer], AppBinding] = {}
@@ -133,6 +135,15 @@ class NavigationController:
     def set_trigger_interval_ms(self, interval_ms: int) -> None:
         with self._lock:
             self._trigger_interval_ns = max(50, min(1500, interval_ms)) * 1_000_000
+
+    @property
+    def caps_hold_assign_enabled(self) -> bool:
+        with self._lock:
+            return self._enable_caps_hold_assign
+
+    def set_caps_hold_assign_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enable_caps_hold_assign = bool(enabled)
 
     def update_bindings(self, bindings: list[AppBinding] | tuple[AppBinding, ...]) -> None:
         mapping = {b.slot_key: b for b in bindings}
@@ -311,12 +322,15 @@ class NavigationController:
         if event.is_autorepeat or event.other_modifiers_held:
             return StepResult(InputAction.SWALLOW)
 
-        # Keyboard shortcut inside Navigator HUD: Tab -> Quick Assign Open App
+        # Optional keyboard shortcut inside Navigator HUD: Tab -> Quick Assign Open App
+        # (Only enabled when trigger.enable_caps_hold_assign is opted-in.)
         if event.kind is KeyKind.TAB:
-            return StepResult(
-                InputAction.SWALLOW,
-                self._enter_quick_assign_app_locked(),
-            )
+            if self._enable_caps_hold_assign:
+                return StepResult(
+                    InputAction.SWALLOW,
+                    self._enter_quick_assign_app_locked(),
+                )
+            return StepResult(InputAction.SWALLOW)
 
         # Keyboard shortcut inside Navigator HUD: ',' -> Open full GUI Edit Assignments window
         if event.kind is KeyKind.COMMA:
@@ -334,12 +348,17 @@ class NavigationController:
 
         if binding is None:
             prefix = "⇧" if chosen_layer is Layer.SHIFT else ""
+            hint = (
+                "Hold Caps Lock 2s (or press ',') to assign"
+                if self._enable_caps_hold_assign
+                else "Press ',' to Edit Assignments"
+            )
             return StepResult(
                 InputAction.SWALLOW,
                 (
                     ShowStatusBannerCommand(
                         level="info",
-                        message=f"No app assigned to {prefix}{letter}  ·  Hold Caps Lock 2s (or press Tab) to assign open apps",
+                        message=f"No app assigned to {prefix}{letter}  ·  {hint}",
                         auto_hide_ms=2200,
                         keep_app_map=True,
                     ),
@@ -578,7 +597,7 @@ class NavigationController:
             return ()
 
         if isinstance(event, CapsHoldTriggered):
-            if self._state is NavState.ASSIGNMENT_EDITING:
+            if not self._enable_caps_hold_assign or self._state is NavState.ASSIGNMENT_EDITING:
                 return ()
             return self._enter_quick_assign_app_locked()
 

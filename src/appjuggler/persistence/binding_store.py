@@ -95,10 +95,14 @@ def parse_config_dict(raw: Any) -> AppConfig:
     raw_trigger = raw.get("trigger", {"kind": "double_caps_lock", "interval_ms": 300})
     if not isinstance(raw_trigger, dict):
         raise ConfigValidationError("'trigger' must be a JSON object.")
+    raw_enable_hold = raw_trigger.get("enable_caps_hold_assign", False)
+    if not isinstance(raw_enable_hold, bool):
+        raise ConfigValidationError("'trigger.enable_caps_hold_assign' must be a boolean.")
     try:
         trigger = TriggerConfig(
             kind=str(raw_trigger.get("kind", "double_caps_lock")),
             interval_ms=int(raw_trigger.get("interval_ms", 300)),
+            enable_caps_hold_assign=raw_enable_hold,
             hold_assign_ms=int(raw_trigger.get("hold_assign_ms", 2000)),
         )
     except (TypeError, ValueError) as exc:
@@ -173,13 +177,19 @@ def serialize_config_dict(config: AppConfig) -> dict[str, Any]:
             item["bundle_path"] = b.bundle_path
         bindings_out.append(item)
 
+    trigger_out: dict[str, Any] = {
+        "kind": config.trigger.kind,
+        "interval_ms": config.trigger.interval_ms,
+    }
+    if config.trigger.enable_caps_hold_assign:
+        trigger_out["enable_caps_hold_assign"] = True
+        trigger_out["hold_assign_ms"] = config.trigger.hold_assign_ms
+    elif config.trigger.hold_assign_ms != 2000:
+        trigger_out["hold_assign_ms"] = config.trigger.hold_assign_ms
+
     return {
         "schema_version": config.schema_version,
-        "trigger": {
-            "kind": config.trigger.kind,
-            "interval_ms": config.trigger.interval_ms,
-            "hold_assign_ms": config.trigger.hold_assign_ms,
-        },
+        "trigger": trigger_out,
         "bindings": bindings_out,
     }
 
@@ -357,6 +367,26 @@ class BindingStore:
             new_trigger = TriggerConfig(
                 kind=self._config.trigger.kind,
                 interval_ms=interval_ms,
+                enable_caps_hold_assign=self._config.trigger.enable_caps_hold_assign,
+                hold_assign_ms=self._config.trigger.hold_assign_ms,
+            )
+            new_cfg = AppConfig(
+                schema_version=SCHEMA_VERSION,
+                trigger=new_trigger,
+                bindings=self._config.bindings,
+            )
+            self._write_atomic_locked(new_cfg)
+            self._config = new_cfg
+            return new_cfg
+
+    def set_caps_hold_assign_enabled(self, enabled: bool) -> AppConfig:
+        """Update and persist the optional 2-second Caps Lock hold quick-assign toggle."""
+        with self._lock:
+            self._ensure_not_corrupted_locked()
+            new_trigger = TriggerConfig(
+                kind=self._config.trigger.kind,
+                interval_ms=self._config.trigger.interval_ms,
+                enable_caps_hold_assign=bool(enabled),
                 hold_assign_ms=self._config.trigger.hold_assign_ms,
             )
             new_cfg = AppConfig(

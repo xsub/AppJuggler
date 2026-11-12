@@ -45,10 +45,10 @@ Defined in `src/appjuggler/domain/state_machine.py`:
 
 | State | Responsibility |
 | --- | --- |
-| `Idle` | Watches for two genuine Caps Lock state-toggling actuations within `interval_ms` (`300 ms`) OR a continuous `hold_assign_ms` (`2000 ms`) physical Caps Lock hold via `IOHIDManager`. Any intervening `keyDown` or modifier press invalidates both candidates (`Caps → A → Caps` types `A` normally). Never blocks or delays Caps Lock. |
-| `AppSelection` | Modal keyboard capture active. Holding `Shift` previews `Layer.SHIFT`; releasing restores `Layer.BASE`. Pressing `A–Z` locks in the active layer at `keyDown` (ignoring Caps Lock state) and advances immediately. Pressing `Tab` jumps to `QuickAssignApp`; pressing `,` opens **Edit Assignments…**. |
-| `QuickAssignApp` | Entered via 2-second `Caps Lock` hold (or `Caps ×2 → Tab`). Lists all open `Regular` applications (frontmost app pre-selected at `#1`). `↑`/`↓` + `Enter` or `1–9` chooses an app and advances to `QuickAssignKey`. |
-| `QuickAssignKey` | Displays the interactive keyboard map (`A–Z` / `⇧A–Z`). Pressing a free letter saves the binding atomically to `config.json` and shows confirmation; pressing an occupied key prompts inline confirmation (`press again` or `Enter` to replace, `Esc` to pick another key). |
+| `Idle` | Watches only for two genuine Caps Lock state-toggling actuations within `interval_ms` (`300 ms`). Never blocks or delays Caps Lock. *(Optional opt-in: if `trigger.enable_caps_hold_assign` is enabled, also accepts `CapsHoldTriggered`.)* |
+| `AppSelection` | Modal keyboard capture active. Holding `Shift` previews `Layer.SHIFT`; releasing restores `Layer.BASE`. Pressing `A–Z` locks in the active layer at `keyDown` (ignoring Caps Lock state) and advances immediately. Pressing `,` opens **Edit Assignments…**. |
+| `QuickAssignApp` | *(Optional — disabled unless `trigger.enable_caps_hold_assign = true`)* Lists open `Regular` applications for in-HUD quick assignment. |
+| `QuickAssignKey` | *(Optional — disabled unless `trigger.enable_caps_hold_assign = true`)* Interactive keyboard map for committing quick assignment. |
 | `WindowSelection` | Buffers fast `1–9`, `↑`/`↓`, and `Enter` inputs while window discovery (`resolving=True`) is in flight, then replays them as soon as `AppWindowsResolved` arrives. Once resolved, `↑`/`↓` move highlight without activating, `Enter` activates the highlighted slot, `1–9` jump directly to slot `#1..#9`, and `Esc` cancels. |
 | `LaunchPending` | Target app is closed; launches asynchronously while buffering optional preselected window inputs (`1–9` / arrows) and allowing instant `Esc` cancellation via `op_token`. |
 | `ActivationPending` | Target window/app activation is executing on a bounded worker thread; swallows trailing chord keys until focus is confirmed or a controlled timeout error is reported. |

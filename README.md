@@ -72,19 +72,23 @@ open dist/AppJuggler.app
 
 ## Assigning Apps to Keys
 
-### 1. From Anywhere on the Keyboard — Hold `Caps Lock` for 2 Seconds
-1. **Hold `Caps Lock` continuously for 2 seconds** (detected via raw `IOHIDManager` physical switch state, so normal single/double Caps taps are unaffected).
-2. The **Assign Open App to Key** overlay appears over your current desktop or Fullscreen Space, listing all currently open apps (with your **currently active app pre-selected at `#1`**, plus `Unassigned` vs `Bound: X` badges).
-3. Press **`Enter`** (or **`↑` / `↓` + `Enter`**, or **`1–9`**) to pick an open app.
-4. The **Visual Keyboard Map** appears — press **`A–Z`** (or hold **`⇧ Shift` + `A–Z`** for Layer 2) to bind it immediately!
-   - If the slot is already occupied by another app, press the **same key again** (or `Enter`) to confirm replacing it, or press any other free key.
+### 1. Edit Assignments Window (`Caps ×2 → ,` or Menu Bar Icon)
+- Open **`Edit Assignments…`** anytime from the keyboard by pressing **`Caps Lock ×2 → ,`** *(comma)*, or by clicking the compact keyboard icon in the macOS menu bar.
+- Switch between **Base Layer (`A–Z`)** and **Shift Layer (`⇧A–Z`)**, click any keycap on the visual keyboard map, select an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
+- Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux), and external edits to `config.json` are hot-reloaded automatically.
 
-*(Shortcut: when the normal `Caps ×2` Navigator Map is open, you can also press **`Tab`** to enter Quick Assign Open App, or press **`,`** to open the full GUI **Edit Assignments** window — no menu bar click needed, even if your MacBook camera notch hides rightmost status bar icons.)*
-
-### 2. From the GUI Window (`Caps ×2 → ,` or Menu Bar Keyboard Icon)
-- Open **`Edit Assignments…`** either by pressing **`Caps Lock ×2 → ,`** or clicking the compact keyboard icon in the macOS menu bar.
-- Click **Base Layer (`A–Z`)** or **Shift Layer (`⇧A–Z`)**, click any keycap on the visual keyboard map, choose an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
-- Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux).
+### 2. Optional: Hold `Caps Lock` (2s) Quick Assign *(Disabled by Default)*
+By default, AppJuggler only runs its lightweight `CGEventTap` double-Caps listener and does **not** attach an `IOHIDManager` hold monitor. If you want a 2-second physical `Caps Lock` hold to open an in-HUD open-apps quick-assign picker, opt in via either:
+- Checking **`Hold Caps 2s Quick Assign`** in **`Edit Assignments…`**, or
+- Setting `"enable_caps_hold_assign": true` under `"trigger"` in `config.json`:
+  ```json
+  "trigger": {
+    "kind": "double_caps_lock",
+    "interval_ms": 300,
+    "enable_caps_hold_assign": true,
+    "hold_assign_ms": 2000
+  }
+  ```
 
 ---
 

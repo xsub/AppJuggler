@@ -450,8 +450,15 @@ def test_assignment_editing_and_system_interrupt_isolation() -> None:
     assert isinstance(int_cmds[0], HideOverlayCommand)
 
 
-def test_caps_2s_hold_quick_assign_open_app_to_free_and_occupied_keys() -> None:
-    ctrl = NavigationController(trigger_interval_ms=300)
+def test_caps_2s_hold_disabled_by_default_and_works_when_opted_in() -> None:
+    # Default normal path: 2s Caps-hold Quick Assign is OFF
+    default_ctrl = NavigationController(trigger_interval_ms=300)
+    assert default_ctrl.caps_hold_assign_enabled is False
+    assert default_ctrl.handle_backend_event(CapsHoldTriggered()) == ()
+    assert default_ctrl.state is NavState.IDLE
+
+    # Opt-in path: enable_caps_hold_assign=True
+    ctrl = NavigationController(trigger_interval_ms=300, enable_caps_hold_assign=True)
     term = AppBinding(key="T", layer=Layer.BASE, bundle_id="com.apple.Terminal", display_name="Terminal")
     ctrl.update_bindings((term,))
 
@@ -508,22 +515,31 @@ def test_caps_2s_hold_quick_assign_open_app_to_free_and_occupied_keys() -> None:
     assert r_confirm.commands[0].allow_replace is True
 
 
-def test_in_hud_tab_and_comma_shortcuts_work_without_menubar() -> None:
+def test_in_hud_comma_opens_editor_by_default_and_tab_requires_opt_in() -> None:
+    # Default path: ',' opens Edit Assignments; Tab does NOT enter Quick Assign
     ctrl = NavigationController(trigger_interval_ms=300)
     ctrl.handle_key_event(_caps_event(100, caps_on=True))
     ctrl.handle_key_event(_caps_event(200, caps_on=False))
     assert ctrl.state is NavState.APP_SELECTION
 
-    # Tab switches into Quick Assign Open App
-    r_tab = ctrl.handle_key_event(
-        HardwareKeyEvent(kind=KeyKind.TAB, keycode=48, timestamp_ns=240 * MS)
+    r_tab_disabled = ctrl.handle_key_event(
+        HardwareKeyEvent(kind=KeyKind.TAB, keycode=48, timestamp_ns=220 * MS)
     )
-    assert ctrl.state is NavState.QUICK_ASSIGN_APP
-    assert isinstance(r_tab.commands[0], RequestOpenAppsForAssignCommand)
+    assert ctrl.state is NavState.APP_SELECTION
+    assert r_tab_disabled.commands == ()
 
-    # ',' opens full GUI Edit Assignments window
     r_comma = ctrl.handle_key_event(
-        HardwareKeyEvent(kind=KeyKind.COMMA, keycode=43, timestamp_ns=280 * MS)
+        HardwareKeyEvent(kind=KeyKind.COMMA, keycode=43, timestamp_ns=240 * MS)
     )
     assert ctrl.state is NavState.IDLE
     assert any(isinstance(c, OpenFullAssignmentWindowCommand) for c in r_comma.commands)
+
+    # Opt-in path: Tab enters Quick Assign Open App
+    ctrl.set_caps_hold_assign_enabled(True)
+    ctrl.handle_key_event(_caps_event(400, caps_on=True))
+    ctrl.handle_key_event(_caps_event(500, caps_on=False))
+    r_tab = ctrl.handle_key_event(
+        HardwareKeyEvent(kind=KeyKind.TAB, keycode=48, timestamp_ns=540 * MS)
+    )
+    assert ctrl.state is NavState.QUICK_ASSIGN_APP
+    assert isinstance(r_tab.commands[0], RequestOpenAppsForAssignCommand)

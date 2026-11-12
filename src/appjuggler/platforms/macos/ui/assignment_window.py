@@ -57,6 +57,9 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
     def saveIntervalClicked_(self, _sender) -> None:
         self._cb["on_save_interval"]()
 
+    def capsHoldToggled_(self, _sender) -> None:
+        self._cb["on_toggle_caps_hold"]()
+
     def repairConfigClicked_(self, _sender) -> None:
         self._cb["on_repair_config"]()
 
@@ -100,6 +103,7 @@ class AssignmentEditorController:
         self._path_popup = None
         self._conflict_label = None
         self._interval_field = None
+        self._caps_hold_checkbox = None
         self._status_label = None
         self._repair_btn = None
 
@@ -144,6 +148,7 @@ class AssignmentEditorController:
                 "on_browse_app": self._handle_browse_app,
                 "on_refresh_apps": self.refresh_data,
                 "on_save_interval": self._handle_save_interval,
+                "on_toggle_caps_hold": self._handle_toggle_caps_hold,
                 "on_repair_config": self._handle_repair_config,
                 "on_quit_app": self._on_quit_app,
             }
@@ -273,14 +278,14 @@ class AssignmentEditorController:
         content.addSubview_(conf_lbl)
         self._conflict_label = conf_lbl
 
-        # Bottom row: Double-Caps trigger interval + status feedback + repair button
+        # Bottom row: Double-Caps trigger interval + optional Caps-hold checkbox + status + quit
         row5_y = 16.0
-        trig_lbl = Cocoa.NSTextField.labelWithString_("Double-Caps Interval (ms):")
-        trig_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row5_y + 3.0, 175.0, 22.0))
+        trig_lbl = Cocoa.NSTextField.labelWithString_("Double-Caps (ms):")
+        trig_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row5_y + 3.0, 124.0, 22.0))
         content.addSubview_(trig_lbl)
 
         iv_field = Cocoa.NSTextField.alloc().initWithFrame_(
-            Cocoa.NSMakeRect(200.0, row5_y + 2.0, 68.0, 24.0)
+            Cocoa.NSMakeRect(148.0, row5_y + 2.0, 58.0, 24.0)
         )
         iv_field.setStringValue_(str(self._store.trigger.interval_ms))
         content.addSubview_(iv_field)
@@ -289,11 +294,25 @@ class AssignmentEditorController:
         iv_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
             "Save Timing", self._delegate, "saveIntervalClicked:"
         )
-        iv_btn.setFrame_(Cocoa.NSMakeRect(276.0, row5_y, 108.0, 28.0))
+        iv_btn.setFrame_(Cocoa.NSMakeRect(212.0, row5_y, 98.0, 28.0))
         content.addSubview_(iv_btn)
 
+        hold_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Hold Caps 2s Quick Assign",
+            self._delegate,
+            "capsHoldToggled:",
+        )
+        hold_chk.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, 198.0, 22.0))
+        hold_chk.setState_(
+            Cocoa.NSControlStateValueOn
+            if self._store.trigger.enable_caps_hold_assign
+            else Cocoa.NSControlStateValueOff
+        )
+        content.addSubview_(hold_chk)
+        self._caps_hold_checkbox = hold_chk
+
         status_lbl = Cocoa.NSTextField.labelWithString_("")
-        status_lbl.setFrame_(Cocoa.NSMakeRect(398.0, row5_y + 3.0, win_w - 620.0, 22.0))
+        status_lbl.setFrame_(Cocoa.NSMakeRect(528.0, row5_y + 3.0, win_w - 686.0, 22.0))
         status_lbl.setFont_(theme.font_ui(12.0, bold=True))
         content.addSubview_(status_lbl)
         self._status_label = status_lbl
@@ -341,6 +360,12 @@ class AssignmentEditorController:
         )
 
         self._interval_field.setStringValue_(str(self._store.trigger.interval_ms))
+        if self._caps_hold_checkbox is not None:
+            self._caps_hold_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.trigger.enable_caps_hold_assign
+                else Cocoa.NSControlStateValueOff
+            )
 
         if self._store.load_error:
             self._status_label.setStringValue_("Config file error — protected from overwrite")
@@ -595,6 +620,19 @@ class AssignmentEditorController:
             self._set_feedback(f"Invalid interval: {exc}", is_error=True)
             return
         self._set_feedback(f"Saved double-Caps interval: {ms} ms", is_error=False)
+        self._on_config_updated()
+
+    def _handle_toggle_caps_hold(self) -> None:
+        if self._caps_hold_checkbox is None:
+            return
+        enabled = bool(self._caps_hold_checkbox.state() == Cocoa.NSControlStateValueOn)
+        try:
+            self._store.set_caps_hold_assign_enabled(enabled)
+        except Exception as exc:
+            self._set_feedback(f"Could not save option: {exc}", is_error=True)
+            return
+        state_txt = "enabled" if enabled else "disabled"
+        self._set_feedback(f"2s Caps-hold Quick Assign {state_txt}", is_error=False)
         self._on_config_updated()
 
     def _handle_repair_config(self) -> None:

@@ -126,12 +126,14 @@ class MacOSAppRuntime:
         self._store = store
         self._slot_table = WindowSlotTable()
         self._controller = NavigationController(
-            trigger_interval_ms=store.trigger.interval_ms
+            trigger_interval_ms=store.trigger.interval_ms,
+            enable_caps_hold_assign=store.trigger.enable_caps_hold_assign,
         )
         self._controller.update_bindings(store.bindings)
 
         self._input_adapter = MacOSInputAdapter(
-            hold_assign_ms=store.trigger.hold_assign_ms
+            hold_assign_ms=store.trigger.hold_assign_ms,
+            enable_caps_hold=store.trigger.enable_caps_hold_assign,
         )
         self._permission_monitor = MacOSPermissionMonitor(
             live_tap_checker=lambda: self._input_adapter.is_running
@@ -180,18 +182,21 @@ class MacOSAppRuntime:
         if self._store.load_error:
             self._overlay.show_status_banner(
                 level="error",
-                message="Config file damaged (not overwritten). Hold Caps Lock 2s → ',' to repair.",
+                message="Config file damaged (not overwritten). Press Caps×2 then ',' to repair.",
                 auto_hide_ms=5000,
             )
         elif not status.is_ready and not status.screen_locked:
             self._status_bar.show_permissions_dialog(prompt_system=True)
         else:
-            # Show a brief startup ready toast so user knows AppJuggler is active even if
-            # the MacBook Pro camera notch hides rightmost menu bar icons!
+            ready_msg = (
+                "AppJuggler Ready  ·  Caps×2: Jump  ·  Hold Caps 2s: Quick Assign"
+                if self._store.trigger.enable_caps_hold_assign
+                else "AppJuggler Ready  ·  Caps×2: Jump  ·  Caps×2 then ',': Edit Assignments"
+            )
             self._overlay.show_status_banner(
                 level="success",
-                message="AppJuggler Ready  ·  Caps×2: Jump  ·  Hold Caps 2s: Assign Open App to Key",
-                auto_hide_ms=2400,
+                message=ready_msg,
+                auto_hide_ms=2200,
             )
 
         self._pulse_timer = (
@@ -280,6 +285,7 @@ class MacOSAppRuntime:
                 bindings=self._store.bindings,
                 running_bundle_ids=running,
                 duplicate_conflicts=self._duplicate_conflicts,
+                quick_assign_enabled=self._store.trigger.enable_caps_hold_assign,
             )
         elif isinstance(cmd, UpdateAppMapLayerCommand):
             self._overlay.update_app_map_layer(cmd.active_layer)
@@ -570,8 +576,17 @@ class MacOSAppRuntime:
         self._executor.submit(_scan)
 
     def _sync_config_to_controller(self) -> None:
-        self._controller.set_trigger_interval_ms(self._store.trigger.interval_ms)
-        self._input_adapter.set_hold_assign_ms(self._store.trigger.hold_assign_ms)
+        trig = self._store.trigger
+        self._controller.set_trigger_interval_ms(trig.interval_ms)
+        self._controller.set_caps_hold_assign_enabled(trig.enable_caps_hold_assign)
+        self._input_adapter.set_hold_assign_ms(trig.hold_assign_ms)
+        if trig.enable_caps_hold_assign != self._input_adapter.caps_hold_enabled:
+            was_running = self._input_adapter.is_running
+            if was_running:
+                self._input_adapter.stop()
+            self._input_adapter.set_caps_hold_enabled(trig.enable_caps_hold_assign)
+            if was_running:
+                self._ensure_input_tap_state()
         self._controller.update_bindings(self._store.bindings)
         self._refresh_duplicate_conflicts_async()
         self._update_status_bar_summary()
@@ -631,10 +646,15 @@ class MacOSAppRuntime:
             return status
 
         if status.accessibility_trusted and not self._input_adapter.is_running:
+            hold_cb = (
+                self._on_caps_hold_triggered
+                if self._store.trigger.enable_caps_hold_assign
+                else None
+            )
             started = self._input_adapter.start(
                 on_event=self._on_hardware_key,
                 on_interrupt=self._on_tap_interrupt,
-                on_caps_hold=self._on_caps_hold_triggered,
+                on_caps_hold=hold_cb,
             )
             if started:
                 status = self._permission_monitor.check_status(prompt=False)

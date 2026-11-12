@@ -106,3 +106,15 @@ def test_reload_if_modified_detects_external_edits(tmp_path: Path) -> None:
     assert store.reload_if_modified() is True
     assert store.get_slot("F", Layer.BASE) is not None
     assert store.reload_if_modified() is False
+
+    # Caps-hold quick assign is disabled by default and omitted from clean config JSON
+    assert store.trigger.enable_caps_hold_assign is False
+    assert "enable_caps_hold_assign" not in cfg_path.read_text(encoding="utf-8")
+
+    store.set_caps_hold_assign_enabled(True)
+    assert store.trigger.enable_caps_hold_assign is True
+    assert '"enable_caps_hold_assign": true' in cfg_path.read_text(encoding="utf-8")
+
+    store.set_caps_hold_assign_enabled(False)
+    assert store.trigger.enable_caps_hold_assign is False
+    assert "enable_caps_hold_assign" not in cfg_path.read_text(encoding="utf-8")

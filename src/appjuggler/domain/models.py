@@ -46,11 +46,14 @@ class TriggerConfig:
 
     kind: str = "double_caps_lock"
     interval_ms: int = 300
+    enable_caps_hold_assign: bool = False
     hold_assign_ms: int = 2000
 
     def __post_init__(self) -> None:
         if self.kind != "double_caps_lock":
             raise ValueError(f"Unsupported trigger kind: {self.kind!r}")
+        if not isinstance(self.enable_caps_hold_assign, bool):
+            raise ValueError("trigger.enable_caps_hold_assign must be a boolean")
         if not (50 <= self.interval_ms <= 1500):
             raise ValueError(
                 f"trigger.interval_ms must be between 50 and 1500 ms, got {self.interval_ms}"

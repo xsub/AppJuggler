@@ -235,7 +235,8 @@ class _HUDContentView(Cocoa.NSView):
         self.banner_message: str = ""
         self.icon_provider: Callable[[str, str | None], object | None] | None = None
 
-        # Quick Assign state
+        # Optional Quick Assign state (disabled by default)
+        self.quick_assign_enabled: bool = False
         self.assign_apps: tuple[AppRecord, ...] = ()
         self.assign_selected_index: int = 0
         self.assign_bindings: tuple[AppBinding, ...] = ()
@@ -298,8 +299,13 @@ class _HUDContentView(Cocoa.NSView):
             align=Cocoa.NSTextAlignmentCenter,
         )
 
+        header_hint = (
+            "⇧ Layer 2  ·  Tab Quick Assign  ·  , Edit Assignments  ·  Esc Cancel"
+            if self.quick_assign_enabled
+            else "⇧ Layer 2  ·  , Edit Assignments  ·  Esc Cancel"
+        )
         theme.draw_text(
-            "⇧ Layer 2  ·  Tab Assign Open App  ·  , Settings  ·  Esc Cancel",
+            header_hint,
             Cocoa.NSMakeRect(310.0, 16.0, bounds.size.width - 332.0, 18.0),
             theme.font_ui(11.5, bold=False),
             theme.TEXT_SECONDARY,
@@ -842,12 +848,14 @@ class MacOSOverlayPresenter(OverlayPresenter):
         running_bundle_ids: frozenset[str],
         duplicate_conflicts: frozenset[str],
         notice: str | None = None,
+        quick_assign_enabled: bool = False,
     ) -> None:
         self._cancel_banner_timer()
         panel, content = self._ensure_panel_on_main()
         content.mode = "map"
         content.active_layer = active_layer
         content.notice = notice
+        content.quick_assign_enabled = quick_assign_enabled
 
         gw, gh = KeyboardMapGridView.required_size()
         pw, ph = self._map_panel_size(bool(notice))
