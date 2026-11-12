@@ -5,6 +5,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import queue
+import threading
 from typing import Callable
 
 import Cocoa
@@ -484,13 +485,29 @@ class MacOSAppRuntime:
             )
         )
 
+    def _hide_overlay_sync(self, timeout_sec: float = 0.06) -> None:
+        done = threading.Event()
+
+        def _do_hide() -> None:
+            self._active_window_list_bundle = None
+            self._overlay.hide()
+            done.set()
+
+        self._main.dispatch(_do_hide)
+        done.wait(timeout=timeout_sec)
+
     def _task_activate_window(self, op_token: int, binding, slot) -> None:
         if self._controller.op_token != op_token:
             return
+        # Hide the picker NSPanel BEFORE raising/fullscreening so no floating
+        # FullScreenAuxiliary panel interferes with WindowServer transitions.
+        self._hide_overlay_sync()
+
+        want_fullscreen = self._store.auto_fullscreen_on_switch
         outcome = self._window_activator.activate_window(
             slot.window,
             timeout_sec=0.9,
-            make_fullscreen=self._store.auto_fullscreen_on_switch,
+            make_fullscreen=False,
         )
         if outcome.stale_window:
             discovered = self._window_registry.discover_windows(
@@ -511,6 +528,7 @@ class MacOSAppRuntime:
 
         if outcome.success:
             self._slot_table.record_activated(binding.bundle_id, slot.window_id)
+        # Release modal keyboard capture immediately once target window has focus.
         self._post_backend_event(
             ActivationCompleted(
                 op_token=op_token,
@@ -518,6 +536,14 @@ class MacOSAppRuntime:
                 error=outcome.error,
             )
         )
+        # Enforce Full Screen with cross-Space verification/retry (e.g. multi-window Finder
+        # picked across Spaces) without blocking keyboard input.
+        if outcome.success and want_fullscreen and self._controller.op_token == op_token:
+            self._window_activator.ensure_window_fullscreen(
+                slot.window,
+                is_cancelled=lambda: self._controller.op_token != op_token,
+                timeout_sec=1.6,
+            )
 
     def _task_activate_app_only(self, op_token: int, binding) -> None:
         if self._controller.op_token != op_token:

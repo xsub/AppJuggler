@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Callable
 
 import ApplicationServices
 import Cocoa
@@ -115,8 +116,11 @@ class MacOSWindowActivator(WindowActivator):
 
         while time.monotonic() < deadline:
             if self._is_verified_focused(running_app, ax_app, ax_win):
+                # Re-assert target window once process is active so multi-window apps
+                # (e.g. Finder with several windows across Spaces) lock focus onto THIS window.
+                self._raise_and_focus_ax(ax_app, ax_win)
                 if make_fullscreen:
-                    self._ensure_window_fullscreen(ax_app, ax_win, window)
+                    self.ensure_window_fullscreen(window, timeout_sec=1.6)
                 elapsed = (time.monotonic() - started) * 1000.0
                 logger.info(
                     "Activated window for bundle=%s in %.1f ms",
@@ -138,8 +142,9 @@ class MacOSWindowActivator(WindowActivator):
         # and no fatal AX error occurred, otherwise report controlled timeout.
         elapsed = (time.monotonic() - started) * 1000.0
         if running_app.isActive() and last_ax_err == AX_SUCCESS:
+            self._raise_and_focus_ax(ax_app, ax_win)
             if make_fullscreen:
-                self._ensure_window_fullscreen(ax_app, ax_win, window)
+                self.ensure_window_fullscreen(window, timeout_sec=1.6)
             logger.info(
                 "Activated app/window (Space transition in progress) bundle=%s in %.1f ms",
                 window.bundle_id,
@@ -244,78 +249,163 @@ class MacOSWindowActivator(WindowActivator):
         )
         return err_main == AX_SUCCESS and bool(is_main)
 
-    def _ensure_window_fullscreen(
-        self, ax_app, ax_win, window: DiscoveredWindow
-    ) -> None:
-        """Put a non-modal activated window into Full Screen if not already Full Screen."""
+    def ensure_window_fullscreen(
+        self,
+        window: DiscoveredWindow,
+        is_cancelled: Callable[[], bool] | None = None,
+        timeout_sec: float = 1.6,
+    ) -> bool:
+        """Put a non-modal activated window into Full Screen with cross-Space retry verification.
+
+        When switching from another Space (or from a Fullscreen Space) to a windowed target
+        (e.g. selecting one of several Finder windows from the picker), macOS WindowServer
+        ignores fullscreen requests while the ~450-600 ms Space-switch animation is in flight.
+        This method verifies `AXFullScreen` actually becomes True and retries cleanly once
+        the Space transition settles.
+        """
         if window.is_modal:
-            return
+            return False
+
+        cancelled = is_cancelled or (lambda: False)
+        if cancelled():
+            return False
+
+        ax_win = window.native_handle
+        ax_app = ApplicationServices.AXUIElementCreateApplication(window.pid)
+        ApplicationServices.AXUIElementSetMessagingTimeout(ax_win, 0.30)
+        ApplicationServices.AXUIElementSetMessagingTimeout(ax_app, 0.30)
 
         err_role, raw_role = ApplicationServices.AXUIElementCopyAttributeValue(
             ax_win, ApplicationServices.kAXRoleAttribute, None
         )
         if err_role != AX_SUCCESS or str(raw_role or "") != "AXWindow":
-            return
+            return False
 
         _, raw_subrole = ApplicationServices.AXUIElementCopyAttributeValue(
             ax_win, ApplicationServices.kAXSubroleAttribute, None
         )
         subrole = str(raw_subrole or "")
         if subrole in ("AXSystemDialog", "AXSheet", "AXFloatingWindow", "AXUnknown"):
-            return
+            return False
 
-        err_fs, cur_fs = ApplicationServices.AXUIElementCopyAttributeValue(
-            ax_win, "AXFullScreen", None
-        )
-        if err_fs == AX_SUCCESS and bool(cur_fs):
-            return
+        deadline = time.monotonic() + max(0.35, timeout_sec)
+        last_btn_press_at = -10.0
+        last_menu_press_at = -10.0
 
-        # 1. Preferred path: directly set idempotent AXFullScreen = True.
-        err_set, is_settable = ApplicationServices.AXUIElementIsAttributeSettable(
-            ax_win, "AXFullScreen", None
-        )
-        if err_set == AX_SUCCESS and bool(is_settable):
-            err_write = ApplicationServices.AXUIElementSetAttributeValue(
-                ax_win, "AXFullScreen", True
+        while time.monotonic() < deadline:
+            if cancelled():
+                return False
+
+            running_app = self._find_running_app(window.bundle_id, window.pid)
+            if running_app is None or not self._window_registry.is_window_alive(window):
+                return False
+
+            err_fs, cur_fs = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_win, "AXFullScreen", None
             )
-            if err_write == AX_SUCCESS:
-                return
+            if err_fs == AX_SUCCESS and bool(cur_fs):
+                return True
 
-        # Measure current AX window geometry and match to its NSScreen.
-        win_rect = self._read_ax_rect(ax_win)
-        scr, primary_h = self._screen_for_ax_rect(win_rect)
-        scr_frame = scr.frame() if scr is not None else None
-        if (
-            win_rect is not None
-            and scr_frame is not None
-            and win_rect[2] >= float(scr_frame.size.width) - 8.0
-            and win_rect[3] >= float(scr_frame.size.height) - 8.0
-        ):
-            # Already spans the full display (e.g. Electron window in Full Screen).
-            return
+            err_set, is_settable = ApplicationServices.AXUIElementIsAttributeSettable(
+                ax_win, "AXFullScreen", None
+            )
+            can_set_ax_fs = err_set == AX_SUCCESS and bool(is_settable)
 
-        # 2. Dedicated Full Screen titlebar button if exposed.
-        err_btn, fs_btn = ApplicationServices.AXUIElementCopyAttributeValue(
-            ax_win, ApplicationServices.kAXFullScreenButtonAttribute, None
-        )
-        if err_btn == AX_SUCCESS and fs_btn is not None:
+            err_btn, fs_btn = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_win, ApplicationServices.kAXFullScreenButtonAttribute, None
+            )
+            has_fs_btn = err_btn == AX_SUCCESS and fs_btn is not None
+
+            win_rect = self._read_ax_rect(ax_win)
+            scr, primary_h = self._screen_for_ax_rect(win_rect)
+            scr_frame = scr.frame() if scr is not None else None
             if (
-                ApplicationServices.AXUIElementPerformAction(
-                    fs_btn, ApplicationServices.kAXPressAction
-                )
-                == AX_SUCCESS
+                not can_set_ax_fs
+                and not has_fs_btn
+                and win_rect is not None
+                and scr_frame is not None
+                and win_rect[2] >= float(scr_frame.size.width) - 8.0
+                and win_rect[3] >= float(scr_frame.size.height) - 8.0
             ):
-                return
+                return True
 
-        # 3. Electron / custom-titlebar apps (e.g. VS Code / Antigravity) that expose
-        #    'Toggle Full Screen' / 'Enter Full Screen' in View or Window menu.
-        if self._trigger_menubar_enter_fullscreen(ax_app):
-            return
+            # Keep the selected window raised and main in multi-window apps (like Finder)
+            # after any incoming Space swoosh lands.
+            if not running_app.isActive():
+                self._activate_ns_running_app(running_app)
+            self._raise_and_focus_ax(ax_app, ax_win)
 
-        # 4. Graceful maximize fallback for windows that do not support native macOS
-        #    Full Screen Spaces (e.g. Activity Monitor): fill the screen's visibleFrame.
-        if scr is not None and primary_h > 0.0:
-            self._fill_screen_visible_frame(ax_win, scr, primary_h)
+            # 1. Try setting idempotent AXFullScreen = True.
+            if can_set_ax_fs:
+                ApplicationServices.AXUIElementSetAttributeValue(
+                    ax_win, "AXFullScreen", True
+                )
+                if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.14):
+                    return True
+
+            # 2. If AXFullScreen is still False, press native AXFullScreenButton
+            #    (strictly gated on subrole == 'AXFullScreenButton' & enabled == True
+            #    with cooldown so it can never toggle back out of Full Screen).
+            now = time.monotonic()
+            if has_fs_btn and (now - last_btn_press_at) >= 0.60:
+                _, btn_sub = ApplicationServices.AXUIElementCopyAttributeValue(
+                    fs_btn, ApplicationServices.kAXSubroleAttribute, None
+                )
+                _, btn_en = ApplicationServices.AXUIElementCopyAttributeValue(
+                    fs_btn, ApplicationServices.kAXEnabledAttribute, None
+                )
+                _, cur_fs_again = ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, "AXFullScreen", None
+                )
+                if (
+                    not bool(cur_fs_again)
+                    and str(btn_sub or "") == "AXFullScreenButton"
+                    and bool(btn_en)
+                ):
+                    if (
+                        ApplicationServices.AXUIElementPerformAction(
+                            fs_btn, ApplicationServices.kAXPressAction
+                        )
+                        == AX_SUCCESS
+                    ):
+                        last_btn_press_at = time.monotonic()
+                        if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.18):
+                            return True
+
+            # 3. Electron / custom-titlebar apps without AXFullScreen settable or button.
+            if not can_set_ax_fs and not has_fs_btn:
+                if (time.monotonic() - last_menu_press_at) >= 0.75:
+                    if self._trigger_menubar_enter_fullscreen(ax_app):
+                        last_menu_press_at = time.monotonic()
+                        time.sleep(0.18)
+                        continue
+                # 4. Graceful maximize fallback only when native Full Screen is unsupported.
+                if scr is not None and primary_h > 0.0:
+                    self._fill_screen_visible_frame(ax_win, scr, primary_h)
+                return True
+
+            time.sleep(0.14)
+
+        _, final_fs = ApplicationServices.AXUIElementCopyAttributeValue(
+            ax_win, "AXFullScreen", None
+        )
+        return bool(final_fs)
+
+    @staticmethod
+    def _wait_until_ax_fullscreen(
+        ax_win, cancelled: Callable[[], bool], wait_sec: float
+    ) -> bool:
+        end = time.monotonic() + wait_sec
+        while time.monotonic() < end:
+            if cancelled():
+                return False
+            err, fs_val = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_win, "AXFullScreen", None
+            )
+            if err == AX_SUCCESS and bool(fs_val):
+                return True
+            time.sleep(0.035)
+        return False
 
     @staticmethod
     def _trigger_menubar_enter_fullscreen(ax_app) -> bool:
