@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.resources
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +18,53 @@ from appjuggler.persistence.binding_store import (
 )
 from appjuggler.platforms.macos.ui import theme
 from appjuggler.platforms.macos.ui.overlay_panel import KeyboardMapGridView
+
+
+class _RoundedCardView(Cocoa.NSView):
+    """Pure-AppKit rounded card container (avoids CGColor pointer bridging warnings)."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_RoundedCardView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._bg_color = Cocoa.NSColor.whiteColor()
+        self._border_color = None
+        self._radius = 8.0
+        self._logo_image = None
+        return self
+
+    @objc.python_method
+    def configure(
+        self,
+        *,
+        bg_color,
+        border_color=None,
+        radius: float = 8.0,
+        logo_image=None,
+    ) -> None:
+        self._bg_color = bg_color
+        self._border_color = border_color
+        self._radius = radius
+        self._logo_image = logo_image
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, _dirty_rect) -> None:
+        bounds = Cocoa.NSInsetRect(self.bounds(), 0.5, 0.5)
+        theme.fill_round_rect(bounds, self._radius, self._bg_color, self._border_color, 1.0)
+        if self._logo_image is not None:
+            Cocoa.NSGraphicsContext.saveGraphicsState()
+            clip = Cocoa.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                bounds, self._radius, self._radius
+            )
+            clip.addClip()
+            img_rect = Cocoa.NSInsetRect(bounds, 5.0, 3.0)
+            self._logo_image.drawInRect_fromRect_operation_fraction_(
+                img_rect,
+                Cocoa.NSZeroRect,
+                Cocoa.NSCompositingOperationSourceOver,
+                1.0,
+            )
+            Cocoa.NSGraphicsContext.restoreGraphicsState()
 
 
 class _AssignmentWindowDelegate(Cocoa.NSObject):
@@ -126,7 +174,7 @@ class AssignmentEditorController:
     def _build_window(self) -> None:
         gw, gh = KeyboardMapGridView.required_size()
         win_w = gw + 40.0
-        win_h = gh + 324.0
+        win_h = gh + 340.0
         style = (
             Cocoa.NSWindowStyleMaskTitled
             | Cocoa.NSWindowStyleMaskClosable
@@ -189,12 +237,14 @@ class AssignmentEditorController:
 
         # Visual Keyboard Map (dark container frame)
         map_y = win_h - 54.0 - gh
-        map_box = Cocoa.NSView.alloc().initWithFrame_(
+        map_box = _RoundedCardView.alloc().initWithFrame_(
             Cocoa.NSMakeRect(20.0, map_y, gw, gh)
         )
-        map_box.setWantsLayer_(True)
-        map_box.layer().setBackgroundColor_(theme.BG_PANEL.CGColor())
-        map_box.layer().setCornerRadius_(12.0)
+        map_box.configure(
+            bg_color=theme.BG_PANEL,
+            border_color=theme.BG_PANEL_BORDER,
+            radius=12.0,
+        )
 
         grid = KeyboardMapGridView.alloc().initWithFrame_(
             Cocoa.NSMakeRect(0.0, 0.0, gw, gh)
@@ -283,8 +333,15 @@ class AssignmentEditorController:
         content.addSubview_(conf_lbl)
         self._conflict_label = conf_lbl
 
-        # Options row: Switch Target Window to Full Screen + Optional 2s Caps-hold Quick Assign
-        opts_y = 54.0
+        # Horizontal divider separating binding editor from options & branding footer
+        sep = Cocoa.NSBox.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(20.0, 106.0, win_w - 40.0, 1.0)
+        )
+        sep.setBoxType_(Cocoa.NSBoxSeparator)
+        content.addSubview_(sep)
+
+        # Options row: Switch Target Window to Full Screen + Optional 2s Caps-hold + Branding
+        opts_y = 64.0
         fs_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
             "Switch Target Window to Full Screen",
             self._delegate,
@@ -312,6 +369,38 @@ class AssignmentEditorController:
         )
         content.addSubview_(hold_chk)
         self._caps_hold_checkbox = hold_chk
+
+        # "AI ENGINEERED BY: [PUFFY CLOUDS]" branding badge (right-aligned in Edit Mode)
+        badge_w = 122.0
+        badge_h = 44.0
+        badge_x = win_w - 20.0 - badge_w
+        badge_y = 53.0
+
+        eng_lbl = Cocoa.NSTextField.labelWithString_("AI ENGINEERED BY:")
+        eng_lbl.setFont_(theme.font_ui(11.0, bold=True))
+        eng_lbl.setTextColor_(Cocoa.NSColor.secondaryLabelColor())
+        eng_lbl.setAlignment_(Cocoa.NSTextAlignmentRight)
+        eng_lbl.setFrame_(Cocoa.NSMakeRect(badge_x - 144.0, badge_y + 13.0, 136.0, 18.0))
+        content.addSubview_(eng_lbl)
+
+        logo_img = self._load_puffy_clouds_logo()
+        logo_card = _RoundedCardView.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(badge_x, badge_y, badge_w, badge_h)
+        )
+        logo_card.configure(
+            bg_color=Cocoa.NSColor.whiteColor(),
+            border_color=theme.rgba(148, 163, 184, 0.40),
+            radius=7.0,
+            logo_image=logo_img,
+        )
+        if logo_img is None:
+            fallback_lbl = Cocoa.NSTextField.labelWithString_("PUFFY CLOUDS")
+            fallback_lbl.setFont_(theme.font_ui(11.0, bold=True))
+            fallback_lbl.setTextColor_(Cocoa.NSColor.blackColor())
+            fallback_lbl.setAlignment_(Cocoa.NSTextAlignmentCenter)
+            fallback_lbl.setFrame_(Cocoa.NSMakeRect(4.0, 12.0, badge_w - 8.0, 18.0))
+            logo_card.addSubview_(fallback_lbl)
+        content.addSubview_(logo_card)
 
         # Bottom row: Double-Caps trigger interval + status feedback + repair + quit
         row5_y = 14.0
@@ -714,6 +803,19 @@ class AssignmentEditorController:
         alert.addButtonWithTitle_("Replace Assignment")
         alert.addButtonWithTitle_("Cancel")
         return alert.runModal() == Cocoa.NSAlertFirstButtonReturn
+
+    @staticmethod
+    def _load_puffy_clouds_logo():
+        try:
+            raw = (
+                importlib.resources.files("appjuggler.assets")
+                .joinpath("puffy_clouds_logo.png")
+                .read_bytes()
+            )
+            ns_data = Cocoa.NSData.dataWithBytes_length_(raw, len(raw))
+            return Cocoa.NSImage.alloc().initWithData_(ns_data)
+        except Exception:
+            return None
 
     @staticmethod
     def _show_alert(title: str, message: str) -> None:
