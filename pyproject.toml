@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appjuggler"
+version = "0.1.0"
+description = "AppJuggler: Jump straight to any app or window from your keyboard."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "AppJuggler Contributors"}
+]
+dependencies = [
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "py2app>=0.28; sys_platform == 'darwin'",
+]
+
+[project.scripts]
+appjuggler = "appjuggler.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/xsub/AppJuggler"
+Repository = "https://github.com/xsub/AppJuggler"
+Issues = "https://github.com/xsub/AppJuggler/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
