@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import queue
 import threading
+import time
 from typing import Callable
 
 import Cocoa
@@ -285,11 +286,18 @@ class MacOSAppRuntime:
                 self._executor.submit(self._task_launch_app, cmd.op_token, cmd.binding)
             elif isinstance(cmd, ActivateWindowCommand):
                 self._executor.submit(
-                    self._task_activate_window, cmd.op_token, cmd.binding, cmd.slot
+                    self._task_activate_window,
+                    cmd.op_token,
+                    cmd.binding,
+                    cmd.slot,
+                    cmd.from_launch,
                 )
             elif isinstance(cmd, ActivateAppNoWindowsCommand):
                 self._executor.submit(
-                    self._task_activate_app_only, cmd.op_token, cmd.binding
+                    self._task_activate_app_only,
+                    cmd.op_token,
+                    cmd.binding,
+                    cmd.from_launch,
                 )
             elif isinstance(cmd, RequestOpenAppsForAssignCommand):
                 self._executor.submit(self._task_resolve_open_apps_for_assign, cmd.op_token)
@@ -523,7 +531,13 @@ class MacOSAppRuntime:
         self._main.dispatch(_do_hide)
         done.wait(timeout=timeout_sec)
 
-    def _task_activate_window(self, op_token: int, binding, slot) -> None:
+    def _task_activate_window(
+        self,
+        op_token: int,
+        binding,
+        slot,
+        from_launch: bool = False,
+    ) -> None:
         if self._controller.op_token != op_token:
             return
         # Hide the picker NSPanel BEFORE raising/fullscreening so no floating
@@ -533,7 +547,7 @@ class MacOSAppRuntime:
         want_fullscreen = self._store.auto_fullscreen_on_switch
         outcome = self._window_activator.activate_window(
             slot.window,
-            timeout_sec=0.9,
+            timeout_sec=1.1 if from_launch else 0.9,
             make_fullscreen=False,
         )
         if outcome.stale_window:
@@ -541,17 +555,27 @@ class MacOSAppRuntime:
                 binding.bundle_id, timeout_sec=0.5
             )
             snap = self._slot_table.reconcile(binding.bundle_id, discovered)
-            self._post_backend_event(
-                ActivationCompleted(
-                    op_token=op_token,
-                    success=False,
-                    stale_window=True,
-                    refreshed_slots=snap.slots,
-                    refreshed_generation=snap.generation,
-                    error=outcome.error,
+            # If a freshly launched app replaced its splash window with its real main
+            # window during activation, activate & fullscreen that main window directly!
+            if from_launch and len(snap.slots) == 1:
+                slot = snap.slots[0]
+                outcome = self._window_activator.activate_window(
+                    slot.window,
+                    timeout_sec=0.9,
+                    make_fullscreen=False,
                 )
-            )
-            return
+            else:
+                self._post_backend_event(
+                    ActivationCompleted(
+                        op_token=op_token,
+                        success=False,
+                        stale_window=True,
+                        refreshed_slots=snap.slots,
+                        refreshed_generation=snap.generation,
+                        error=outcome.error,
+                    )
+                )
+                return
 
         if outcome.success:
             self._slot_table.record_activated(binding.bundle_id, slot.window_id)
@@ -563,18 +587,26 @@ class MacOSAppRuntime:
                 error=outcome.error,
             )
         )
-        # Enforce Full Screen with cross-Space verification/retry (e.g. multi-window Finder
-        # picked across Spaces) without blocking keyboard input.
+        # Enforce Full Screen with cross-Space and cold-launch verification/retry
+        # without blocking keyboard input.
         if outcome.success and want_fullscreen and self._controller.op_token == op_token:
             self._window_activator.ensure_window_fullscreen(
                 slot.window,
                 is_cancelled=lambda: self._controller.op_token != op_token,
-                timeout_sec=1.6,
+                timeout_sec=3.0 if from_launch else 1.6,
+                allow_window_reacquire=from_launch,
             )
 
-    def _task_activate_app_only(self, op_token: int, binding) -> None:
+    def _task_activate_app_only(
+        self,
+        op_token: int,
+        binding,
+        from_launch: bool = False,
+    ) -> None:
         if self._controller.op_token != op_token:
             return
+        self._hide_overlay_sync()
+        want_fullscreen = self._store.auto_fullscreen_on_switch
         outcome = self._window_activator.activate_application_only(
             binding.bundle_id, timeout_sec=0.6
         )
@@ -585,6 +617,62 @@ class MacOSAppRuntime:
                 error=outcome.error,
             )
         )
+        if outcome.success and want_fullscreen and self._controller.op_token == op_token:
+            # Cold-launched apps (e.g. heavy Electron apps) or apps auto-opening a default
+            # window upon activation may create their main window slightly after activation;
+            # watch briefly and switch that window into Full Screen once it appears.
+            wait_budget = 6.0 if from_launch else 0.9
+            self._await_launched_window_and_fullscreen(
+                op_token=op_token,
+                binding=binding,
+                timeout_sec=wait_budget,
+            )
+
+    def _await_launched_window_and_fullscreen(
+        self,
+        op_token: int,
+        binding,
+        timeout_sec: float,
+    ) -> None:
+        deadline = time.monotonic() + max(0.3, timeout_sec)
+        ws = Cocoa.NSWorkspace.sharedWorkspace()
+        while time.monotonic() < deadline:
+            if self._controller.op_token != op_token:
+                return
+            if not self._store.auto_fullscreen_on_switch:
+                return
+            front = ws.frontmostApplication()
+            if front is not None and front.bundleIdentifier():
+                front_bid = str(front.bundleIdentifier())
+                if front_bid != binding.bundle_id:
+                    return
+
+            discovered = self._window_registry.discover_windows(
+                binding.bundle_id, timeout_sec=0.35
+            )
+            if discovered:
+                snap = self._slot_table.reconcile(binding.bundle_id, discovered)
+                target = next(
+                    (w for w in discovered if not w.is_modal and not w.is_minimized),
+                    discovered[0],
+                )
+                for s in snap.slots:
+                    if s.window_id == target.window_id:
+                        self._slot_table.record_activated(binding.bundle_id, s.window_id)
+                        break
+                self._window_activator.activate_window(
+                    target,
+                    timeout_sec=0.8,
+                    make_fullscreen=False,
+                )
+                self._window_activator.ensure_window_fullscreen(
+                    target,
+                    is_cancelled=lambda: self._controller.op_token != op_token,
+                    timeout_sec=2.8,
+                    allow_window_reacquire=True,
+                )
+                return
+            time.sleep(0.14)
 
     def _task_poll_active_window_list(self, bundle_id: str) -> None:
         if self._controller.state is not NavState.WINDOW_SELECTION:

@@ -99,12 +99,14 @@ class ActivateWindowCommand:
     binding: AppBinding
     slot: WindowSlot
     generation: int
+    from_launch: bool = False
 
 
 @dataclass(frozen=True)
 class ActivateAppNoWindowsCommand:
     op_token: int
     binding: AppBinding
+    from_launch: bool = False
 
 
 @dataclass(frozen=True)

@@ -407,15 +407,17 @@ class MacOSApplicationRegistry(ApplicationRegistry):
                 if process_seen_at is None:
                     process_seen_at = now
 
+                finished = self._is_finished_launching(bundle_id)
                 wins = window_registry.discover_windows(bundle_id, timeout_sec=0.35)
-                if len(wins) > 0:
+                if len(wins) > 0 and (finished or (now - process_seen_at) >= 0.20):
                     return LaunchResult(success=True, bundle_path_used=target_path)
 
-                # If launch completion has fired AND process finished launching (`isFinishedLaunching`),
-                # give windowless apps (e.g. Finder/Terminal with no initial window) a brief settle check
-                # triggered by NSWorkspace launch completion before concluding 0 windows.
-                if launch_done.is_set() and self._is_finished_launching(bundle_id):
-                    if (now - process_seen_at) >= 0.35:
+                # Desktop apps (especially Electron/Chromium/SwiftUI) often create their
+                # initial main window 0.4s-1.8s AFTER `isFinishedLaunching` becomes True.
+                # Wait up to 2.0s (event-driven and immediately cancellable via Esc/Caps×2)
+                # before concluding the app launched with 0 windows.
+                if launch_done.is_set() and finished:
+                    if (now - process_seen_at) >= 2.0:
                         return LaunchResult(success=True, bundle_path_used=target_path)
 
             remaining = max(0.02, min(0.08, deadline - time.monotonic()))

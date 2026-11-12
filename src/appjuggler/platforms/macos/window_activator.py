@@ -254,41 +254,33 @@ class MacOSWindowActivator(WindowActivator):
         window: DiscoveredWindow,
         is_cancelled: Callable[[], bool] | None = None,
         timeout_sec: float = 1.6,
+        allow_window_reacquire: bool = False,
     ) -> bool:
-        """Put a non-modal activated window into Full Screen with cross-Space retry verification.
+        """Put a non-modal activated window into Full Screen with cross-Space & cold-launch verification.
 
-        When switching from another Space (or from a Fullscreen Space) to a windowed target
-        (e.g. selecting one of several Finder windows from the picker), macOS WindowServer
-        ignores fullscreen requests while the ~450-600 ms Space-switch animation is in flight.
-        This method verifies `AXFullScreen` actually becomes True and retries cleanly once
-        the Space transition settles.
+        Handles two real-world macOS timing challenges:
+        1. Cross-Space switches: WindowServer ignores fullscreen transitions while the ~500 ms
+           Space swoosh animation is in flight.
+        2. Newly launched apps: Electron/SwiftUI/Cocoa apps may take 200-1200 ms after creating
+           an initial window (or swap out a splash window) before `AXFullScreen` / `AXFullScreenButton`
+           becomes settable and enabled.
         """
-        if window.is_modal:
+        if window.is_modal and not allow_window_reacquire:
             return False
 
         cancelled = is_cancelled or (lambda: False)
         if cancelled():
             return False
 
-        ax_win = window.native_handle
-        ax_app = ApplicationServices.AXUIElementCreateApplication(window.pid)
+        cur_win = window
+        ax_win = cur_win.native_handle
+        ax_app = ApplicationServices.AXUIElementCreateApplication(cur_win.pid)
         ApplicationServices.AXUIElementSetMessagingTimeout(ax_win, 0.30)
         ApplicationServices.AXUIElementSetMessagingTimeout(ax_app, 0.30)
 
-        err_role, raw_role = ApplicationServices.AXUIElementCopyAttributeValue(
-            ax_win, ApplicationServices.kAXRoleAttribute, None
-        )
-        if err_role != AX_SUCCESS or str(raw_role or "") != "AXWindow":
-            return False
-
-        _, raw_subrole = ApplicationServices.AXUIElementCopyAttributeValue(
-            ax_win, ApplicationServices.kAXSubroleAttribute, None
-        )
-        subrole = str(raw_subrole or "")
-        if subrole in ("AXSystemDialog", "AXSheet", "AXFloatingWindow", "AXUnknown"):
-            return False
-
-        deadline = time.monotonic() + max(0.35, timeout_sec)
+        started_fs = time.monotonic()
+        deadline = started_fs + max(0.35, timeout_sec)
+        native_grace_sec = 1.1 if allow_window_reacquire else 0.65
         last_btn_press_at = -10.0
         last_menu_press_at = -10.0
 
@@ -296,9 +288,47 @@ class MacOSWindowActivator(WindowActivator):
             if cancelled():
                 return False
 
-            running_app = self._find_running_app(window.bundle_id, window.pid)
-            if running_app is None or not self._window_registry.is_window_alive(window):
-                return False
+            running_app = self._find_running_app(cur_win.bundle_id, cur_win.pid)
+            win_alive = running_app is not None and self._window_registry.is_window_alive(cur_win)
+
+            err_role, raw_role = (
+                ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, ApplicationServices.kAXRoleAttribute, None
+                )
+                if win_alive
+                else (-1, None)
+            )
+            _, raw_subrole = (
+                ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, ApplicationServices.kAXSubroleAttribute, None
+                )
+                if win_alive
+                else (-1, None)
+            )
+            subrole = str(raw_subrole or "")
+            non_standard = (
+                not win_alive
+                or err_role != AX_SUCCESS
+                or str(raw_role or "") != "AXWindow"
+                or cur_win.is_modal
+                or subrole in ("AXSystemDialog", "AXSheet", "AXFloatingWindow", "AXUnknown")
+            )
+
+            if non_standard:
+                if not allow_window_reacquire:
+                    return False
+                replacement = self._reacquire_standard_window(cur_win.bundle_id)
+                if replacement is None:
+                    time.sleep(0.14)
+                    continue
+                cur_win = replacement
+                ax_win = cur_win.native_handle
+                ax_app = ApplicationServices.AXUIElementCreateApplication(cur_win.pid)
+                ApplicationServices.AXUIElementSetMessagingTimeout(ax_win, 0.30)
+                ApplicationServices.AXUIElementSetMessagingTimeout(ax_app, 0.30)
+                running_app = self._find_running_app(cur_win.bundle_id, cur_win.pid)
+                if running_app is None:
+                    return False
 
             err_fs, cur_fs = ApplicationServices.AXUIElementCopyAttributeValue(
                 ax_win, "AXFullScreen", None
@@ -330,7 +360,7 @@ class MacOSWindowActivator(WindowActivator):
                 return True
 
             # Keep the selected window raised and main in multi-window apps (like Finder)
-            # after any incoming Space swoosh lands.
+            # after any incoming Space swoosh or cold launch lands.
             if not running_app.isActive():
                 self._activate_ns_running_app(running_app)
             self._raise_and_focus_ax(ax_app, ax_win)
@@ -340,14 +370,14 @@ class MacOSWindowActivator(WindowActivator):
                 ApplicationServices.AXUIElementSetAttributeValue(
                     ax_win, "AXFullScreen", True
                 )
-                if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.14):
+                if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.16):
                     return True
 
             # 2. If AXFullScreen is still False, press native AXFullScreenButton
             #    (strictly gated on subrole == 'AXFullScreenButton' & enabled == True
             #    with cooldown so it can never toggle back out of Full Screen).
             now = time.monotonic()
-            if has_fs_btn and (now - last_btn_press_at) >= 0.60:
+            if has_fs_btn and (now - last_btn_press_at) >= 0.65:
                 _, btn_sub = ApplicationServices.AXUIElementCopyAttributeValue(
                     fs_btn, ApplicationServices.kAXSubroleAttribute, None
                 )
@@ -369,17 +399,32 @@ class MacOSWindowActivator(WindowActivator):
                         == AX_SUCCESS
                     ):
                         last_btn_press_at = time.monotonic()
-                        if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.18):
+                        if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.22):
                             return True
 
-            # 3. Electron / custom-titlebar apps without AXFullScreen settable or button.
+            # 3. Electron / custom-titlebar apps without AXFullScreen settable or button yet.
             if not can_set_ax_fs and not has_fs_btn:
                 if (time.monotonic() - last_menu_press_at) >= 0.75:
                     if self._trigger_menubar_enter_fullscreen(ax_app):
                         last_menu_press_at = time.monotonic()
-                        time.sleep(0.18)
+                        if self._wait_until_ax_fullscreen(ax_win, cancelled, 0.25):
+                            return True
                         continue
-                # 4. Graceful maximize fallback only when native Full Screen is unsupported.
+
+                # Give newly created windows time to attach fullscreen capabilities before
+                # falling back to visibleFrame maximize.
+                if (time.monotonic() - started_fs) < native_grace_sec and (
+                    time.monotonic() + 0.16
+                ) < deadline:
+                    if allow_window_reacquire:
+                        newer = self._reacquire_standard_window(cur_win.bundle_id)
+                        if newer is not None and newer.window_id != cur_win.window_id:
+                            cur_win = newer
+                            ax_win = cur_win.native_handle
+                    time.sleep(0.14)
+                    continue
+
+                # 4. Graceful maximize fallback only when native Full Screen remains unsupported.
                 if scr is not None and primary_h > 0.0:
                     self._fill_screen_visible_frame(ax_win, scr, primary_h)
                 return True
@@ -390,6 +435,13 @@ class MacOSWindowActivator(WindowActivator):
             ax_win, "AXFullScreen", None
         )
         return bool(final_fs)
+
+    def _reacquire_standard_window(self, bundle_id: str) -> DiscoveredWindow | None:
+        discovered = self._window_registry.discover_windows(bundle_id, timeout_sec=0.35)
+        for win in discovered:
+            if not win.is_modal and not win.is_minimized:
+                return win
+        return discovered[0] if discovered else None
 
     @staticmethod
     def _wait_until_ax_fullscreen(
@@ -446,15 +498,46 @@ class MacOSWindowActivator(WindowActivator):
                 _, title = ApplicationServices.AXUIElementCopyAttributeValue(
                     mi, ApplicationServices.kAXTitleAttribute, None
                 )
+                _, mark = ApplicationServices.AXUIElementCopyAttributeValue(
+                    mi, "AXMenuItemMarkChar", None
+                )
                 ident_str = str(ident or "")
                 title_str = str(title or "")
-                if title_str.startswith(("Exit Full Screen", "Leave Full Screen")):
+                mark_str = str(mark or "").strip()
+                if title_str.startswith(
+                    (
+                        "Exit Full Screen",
+                        "Leave Full Screen",
+                        "Opuść tryb pełnoekranowy",
+                        "Wyjdź z trybu pełnoekranowego",
+                    )
+                ):
+                    return False
+                if mark_str and (
+                    ident_str
+                    in (
+                        "enterFullScreenMode:",
+                        "toggleFullScreen:",
+                        "toggleFullScreenMode:",
+                    )
+                    or "Full Screen" in title_str
+                    or "pełnoekranow" in title_str.lower()
+                    or "pełny ekran" in title_str.lower()
+                ):
                     return False
                 if ident_str in (
                     "enterFullScreenMode:",
                     "toggleFullScreen:",
                     "toggleFullScreenMode:",
-                ) or title_str.startswith("Enter Full Screen"):
+                ) or title_str.startswith(
+                    (
+                        "Enter Full Screen",
+                        "Toggle Full Screen",
+                        "Wejdź do trybu pełnoekranowego",
+                        "Przełącz tryb pełnoekranowy",
+                        "Pełny ekran",
+                    )
+                ):
                     act_err = ApplicationServices.AXUIElementPerformAction(
                         mi, ApplicationServices.kAXPressAction
                     )

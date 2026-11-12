@@ -675,6 +675,7 @@ class NavigationController:
                 slots=event.slots,
                 default_slot=event.default_slot,
                 generation=event.generation,
+                from_launch=False,
             )
 
         if isinstance(event, LaunchCompleted):
@@ -691,6 +692,7 @@ class NavigationController:
                 slots=event.slots,
                 default_slot=event.default_slot,
                 generation=event.generation,
+                from_launch=True,
             )
 
         if isinstance(event, WindowListRefreshed):
@@ -888,6 +890,7 @@ class NavigationController:
         slots: tuple[WindowSlot, ...],
         default_slot: int | None,
         generation: int,
+        from_launch: bool = False,
     ) -> tuple[NavCommand, ...]:
         assert self._selected_binding is not None
         binding = self._selected_binding
@@ -899,7 +902,13 @@ class NavigationController:
             self._single_window_digit_guard_until_ns = (
                 self._letter_keydown_ns + self._single_window_digit_guard_ns
             )
-            return (ActivateAppNoWindowsCommand(op_token=self._op_token, binding=binding),)
+            return (
+                ActivateAppNoWindowsCommand(
+                    op_token=self._op_token,
+                    binding=binding,
+                    from_launch=from_launch,
+                ),
+            )
 
         if len(slots) == 1:
             self._pending_inputs.clear()
@@ -916,6 +925,7 @@ class NavigationController:
                     binding=binding,
                     slot=slots[0],
                     generation=generation,
+                    from_launch=from_launch,
                 ),
             )
 

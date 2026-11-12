@@ -631,3 +631,17 @@ def test_mouse_selection_disabled_by_default_and_hover_click_works_when_opted_in
     assert ctrl.state is NavState.LAUNCH_PENDING
     assert isinstance(launch_cmds[0], LaunchAppCommand)
     assert launch_cmds[0].binding.bundle_id == "com.apple.Safari"
+    launch_tok = launch_cmds[0].op_token
+
+    # Cold launch finishing with 1 window marks ActivateWindowCommand(from_launch=True)
+    launched_cmds = ctrl.handle_backend_event(
+        LaunchCompleted(
+            op_token=launch_tok,
+            bundle_id="com.apple.Safari",
+            slots=(_slot(1, "s1", "Start Page"),),
+            default_slot=1,
+            generation=1,
+        )
+    )
+    assert isinstance(launched_cmds[0], ActivateWindowCommand)
+    assert launched_cmds[0].from_launch is True
