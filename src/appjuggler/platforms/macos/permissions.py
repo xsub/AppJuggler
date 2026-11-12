@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import sys
 
 import ApplicationServices
@@ -10,6 +11,22 @@ import Quartz
 
 from appjuggler import APP_BUNDLE_ID
 from appjuggler.contracts import PermissionMonitor, PermissionStatus
+
+_CARBON_LIB: ctypes.CDLL | None = None
+
+
+def is_secure_event_input_enabled() -> bool:
+    """Return True if macOS Secure Event Input is active (password field, lock transition, etc.)."""
+    global _CARBON_LIB
+    try:
+        if _CARBON_LIB is None:
+            lib = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+            lib.IsSecureEventInputEnabled.argtypes = []
+            lib.IsSecureEventInputEnabled.restype = ctypes.c_bool
+            _CARBON_LIB = lib
+        return bool(_CARBON_LIB.IsSecureEventInputEnabled())
+    except Exception:
+        return False
 
 
 def is_screen_locked() -> bool:

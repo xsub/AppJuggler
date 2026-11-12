@@ -262,7 +262,9 @@ class MacOSAppRuntime:
         cmds = self._controller.handle_backend_event(SystemInterruptEvent(reason=reason))
         if cmds:
             self._dispatch_commands(cmds)
-        if reason == "permissions_revoked":
+        if reason in ("screen_locked", "tap_suspended_temporary"):
+            self._main.dispatch(self._handle_tap_suspended_on_main)
+        elif reason == "permissions_revoked":
             self._main.dispatch(self._handle_permissions_revoked_on_main)
 
     def _on_caps_hold_triggered(self) -> None:
@@ -760,14 +762,19 @@ class MacOSAppRuntime:
         if self._assignment_editor.is_visible():
             self._assignment_editor.refresh_data()
 
-    def _handle_permissions_revoked_on_main(self) -> None:
+    def _handle_tap_suspended_on_main(self) -> None:
         self._input_adapter.stop()
         self._ensure_input_tap_state()
-        self._overlay.show_status_banner(
-            level="error",
-            message="Keyboard permissions lost — grant Accessibility to AppJuggler / Terminal.",
-            auto_hide_ms=4500,
-        )
+
+    def _handle_permissions_revoked_on_main(self) -> None:
+        self._input_adapter.stop()
+        status = self._ensure_input_tap_state()
+        if not status.accessibility_trusted and not status.screen_locked:
+            self._overlay.show_status_banner(
+                level="error",
+                message="Keyboard permissions lost — grant Accessibility to AppJuggler / Terminal.",
+                auto_hide_ms=4500,
+            )
 
     def _on_sleep_or_lock(self) -> None:
         self._post_backend_event(SystemInterruptEvent(reason="sleep_or_lock"))

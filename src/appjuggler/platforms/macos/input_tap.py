@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Callable
 
+import ApplicationServices
 import Cocoa
 import objc
 import Quartz
@@ -20,7 +21,10 @@ from appjuggler.platforms.macos.keymap import (
     VK_CAPS_LOCK,
     KeyEventDecoder,
 )
-from appjuggler.platforms.macos.permissions import is_screen_locked
+from appjuggler.platforms.macos.permissions import (
+    is_screen_locked,
+    is_secure_event_input_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,11 +218,20 @@ class MacOSInputAdapter(InputAdapter):
 
     def stop(self) -> None:
         self._cancel_caps_hold_timer()
-        self._unregister_layout_observer()
         with self._lock:
+            was_running = self._running or self._tap is not None
             tap = self._tap
             rl = self._tap_runloop
+            thread = self._thread
             self._running = False
+            self._tap = None
+            self._tap_runloop = None
+            self._thread = None
+
+        if not was_running and thread is None:
+            return
+
+        self._unregister_layout_observer()
 
         if tap is not None:
             try:
@@ -231,10 +244,14 @@ class MacOSInputAdapter(InputAdapter):
                 Quartz.CFRunLoopStop(rl)
             except Exception:
                 pass
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-        self._thread = None
-        logger.info("CGEventTap stopped")
+        if (
+            thread is not None
+            and thread.is_alive()
+            and threading.current_thread() is not thread
+        ):
+            thread.join(timeout=1.0)
+        if was_running:
+            logger.info("CGEventTap stopped")
 
     def _attach_iohid_caps_monitor(self) -> Callable[[], None] | None:
         """Schedule an IOHIDManager keyboard listener on the current thread's CFRunLoop."""
@@ -371,7 +388,7 @@ class MacOSInputAdapter(InputAdapter):
                 if event_type == Quartz.kCGEventTapDisabledByTimeout
                 else "tap_disabled_user"
             )
-            logger.warning("CGEventTap disabled (%s); attempting immediate recovery", reason)
+            logger.debug("CGEventTap disabled (%s); attempting immediate recovery", reason)
             self._cancel_caps_hold_timer()
             if self._on_interrupt is not None:
                 try:
@@ -383,10 +400,25 @@ class MacOSInputAdapter(InputAdapter):
             if tap is not None:
                 Quartz.CGEventTapEnable(tap, True)
                 if not Quartz.CGEventTapIsEnabled(tap):
-                    logger.error("CGEventTap could not be re-enabled (permissions revoked)")
+                    if is_screen_locked():
+                        logger.info("CGEventTap paused (screen locked)")
+                        intr_reason = "screen_locked"
+                    elif is_secure_event_input_enabled() or bool(
+                        ApplicationServices.AXIsProcessTrusted()
+                    ):
+                        logger.info(
+                            "CGEventTap temporarily suspended by macOS (Secure Input / session lock); will resume automatically"
+                        )
+                        intr_reason = "tap_suspended_temporary"
+                    else:
+                        logger.error(
+                            "CGEventTap could not be re-enabled (Accessibility permission revoked)"
+                        )
+                        intr_reason = "permissions_revoked"
+
                     if self._on_interrupt is not None:
                         try:
-                            self._on_interrupt("permissions_revoked")
+                            self._on_interrupt(intr_reason)
                         except Exception:
                             pass
             return event
