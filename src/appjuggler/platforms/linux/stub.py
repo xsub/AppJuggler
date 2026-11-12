@@ -149,6 +149,7 @@ class LinuxWindowActivator(WindowActivator):
         self,
         window: DiscoveredWindow,
         timeout_sec: float = 0.9,
+        make_fullscreen: bool = False,
     ) -> ActivationOutcome:
         raise NotImplementedError("TODO(linux): Send _NET_ACTIVE_WINDOW / Wayland toplevel activate.")
 

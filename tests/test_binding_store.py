@@ -118,3 +118,20 @@ def test_reload_if_modified_detects_external_edits(tmp_path: Path) -> None:
     store.set_caps_hold_assign_enabled(False)
     assert store.trigger.enable_caps_hold_assign is False
     assert "enable_caps_hold_assign" not in cfg_path.read_text(encoding="utf-8")
+
+    # Auto-fullscreen option is disabled by default, persisted when enabled, and preserved on assign
+    assert store.auto_fullscreen_on_switch is False
+    assert "auto_fullscreen_on_switch" not in cfg_path.read_text(encoding="utf-8")
+
+    store.set_auto_fullscreen_on_switch(True)
+    assert store.auto_fullscreen_on_switch is True
+    assert '"auto_fullscreen_on_switch": true' in cfg_path.read_text(encoding="utf-8")
+
+    store.assign(
+        AppBinding(key="T", layer=Layer.BASE, bundle_id="com.apple.Terminal", display_name="Terminal")
+    )
+    assert store.auto_fullscreen_on_switch is True
+
+    store.set_auto_fullscreen_on_switch(False)
+    assert store.auto_fullscreen_on_switch is False
+    assert "auto_fullscreen_on_switch" not in cfg_path.read_text(encoding="utf-8")

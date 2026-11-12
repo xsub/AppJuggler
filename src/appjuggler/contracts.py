@@ -124,6 +124,7 @@ class WindowActivator(Protocol):
         self,
         window: DiscoveredWindow,
         timeout_sec: float = 0.9,
+        make_fullscreen: bool = False,
     ) -> ActivationOutcome: ...
 
     def activate_application_only(

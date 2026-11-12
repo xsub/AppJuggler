@@ -30,6 +30,9 @@ class _StatusMenuTarget(Cocoa.NSObject):
     def reloadConfig_(self, _sender) -> None:
         self._cb["reload_config"]()
 
+    def toggleAutoFullscreen_(self, _sender) -> None:
+        self._cb["toggle_auto_fullscreen"]()
+
     def quitApp_(self, _sender) -> None:
         self._cb["quit_app"]()
 
@@ -44,6 +47,7 @@ class StatusBarController:
         on_edit_assignments: Callable[[], None],
         on_reload_config: Callable[[], None],
         on_quit: Callable[[], None],
+        on_toggle_auto_fullscreen: Callable[[], None] | None = None,
     ) -> None:
         self._permission_monitor = permission_monitor
         self._target = _StatusMenuTarget.alloc().initWithCallbacks_(
@@ -52,12 +56,14 @@ class StatusBarController:
                 "edit_assignments": on_edit_assignments,
                 "show_permissions": self.show_permissions_dialog,
                 "reload_config": on_reload_config,
+                "toggle_auto_fullscreen": on_toggle_auto_fullscreen or (lambda: None),
                 "quit_app": on_quit,
             }
         )
         self._status_item = None
         self._state_menu_item = None
         self._unassigned_menu_item = None
+        self._auto_fs_menu_item = None
 
     def install(self) -> None:
         bar = Cocoa.NSStatusBar.systemStatusBar()
@@ -68,7 +74,7 @@ class StatusBarController:
         if btn is not None:
             self._apply_button_icon(btn, ready=True)
             btn.setToolTip_(
-                "AppJuggler — Caps×2: Navigate | Hold Caps 2s: Assign Open App"
+                "AppJuggler — Caps×2: Navigate | Caps×2 then ',': Edit Assignments"
             )
 
         menu = Cocoa.NSMenu.alloc().initWithTitle_("AppJuggler")
@@ -100,6 +106,13 @@ class StatusBarController:
         )
         edit_item.setTarget_(self._target)
         menu.addItem_(edit_item)
+
+        fs_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Switch Target Window to Full Screen", "toggleAutoFullscreen:", ""
+        )
+        fs_item.setTarget_(self._target)
+        menu.addItem_(fs_item)
+        self._auto_fs_menu_item = fs_item
 
         perm_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Permissions & Diagnostics…", "showPermissions:", ""
@@ -138,7 +151,10 @@ class StatusBarController:
             btn.setTitle_("⌨" if ready else "⚠")
 
     def update_status(
-        self, perm_status: PermissionStatus, unassigned_count: int
+        self,
+        perm_status: PermissionStatus,
+        unassigned_count: int,
+        auto_fullscreen: bool = False,
     ) -> None:
         if self._status_item is None:
             return
@@ -146,10 +162,17 @@ class StatusBarController:
         if btn is not None:
             self._apply_button_icon(btn, ready=perm_status.is_ready)
 
+        if self._auto_fs_menu_item is not None:
+            self._auto_fs_menu_item.setState_(
+                Cocoa.NSControlStateValueOn
+                if auto_fullscreen
+                else Cocoa.NSControlStateValueOff
+            )
+
         if self._state_menu_item is not None:
             if perm_status.is_ready:
                 self._state_menu_item.setTitle_(
-                    "Ready · Caps×2 Jump · Hold Caps 2s Assign"
+                    "Ready · Caps×2 Jump · ',' Edit Assignments"
                 )
             elif perm_status.screen_locked:
                 self._state_menu_item.setTitle_("Paused · Screen Locked")

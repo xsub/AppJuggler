@@ -60,6 +60,9 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
     def capsHoldToggled_(self, _sender) -> None:
         self._cb["on_toggle_caps_hold"]()
 
+    def autoFullscreenToggled_(self, _sender) -> None:
+        self._cb["on_toggle_auto_fullscreen"]()
+
     def repairConfigClicked_(self, _sender) -> None:
         self._cb["on_repair_config"]()
 
@@ -103,6 +106,7 @@ class AssignmentEditorController:
         self._path_popup = None
         self._conflict_label = None
         self._interval_field = None
+        self._auto_fullscreen_checkbox = None
         self._caps_hold_checkbox = None
         self._status_label = None
         self._repair_btn = None
@@ -122,7 +126,7 @@ class AssignmentEditorController:
     def _build_window(self) -> None:
         gw, gh = KeyboardMapGridView.required_size()
         win_w = gw + 40.0
-        win_h = gh + 290.0
+        win_h = gh + 324.0
         style = (
             Cocoa.NSWindowStyleMaskTitled
             | Cocoa.NSWindowStyleMaskClosable
@@ -148,6 +152,7 @@ class AssignmentEditorController:
                 "on_browse_app": self._handle_browse_app,
                 "on_refresh_apps": self.refresh_data,
                 "on_save_interval": self._handle_save_interval,
+                "on_toggle_auto_fullscreen": self._handle_toggle_auto_fullscreen,
                 "on_toggle_caps_hold": self._handle_toggle_caps_hold,
                 "on_repair_config": self._handle_repair_config,
                 "on_quit_app": self._on_quit_app,
@@ -278,8 +283,38 @@ class AssignmentEditorController:
         content.addSubview_(conf_lbl)
         self._conflict_label = conf_lbl
 
-        # Bottom row: Double-Caps trigger interval + optional Caps-hold checkbox + status + quit
-        row5_y = 16.0
+        # Options row: Switch Target Window to Full Screen + Optional 2s Caps-hold Quick Assign
+        opts_y = 54.0
+        fs_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Switch Target Window to Full Screen",
+            self._delegate,
+            "autoFullscreenToggled:",
+        )
+        fs_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_y, 285.0, 22.0))
+        fs_chk.setState_(
+            Cocoa.NSControlStateValueOn
+            if self._store.auto_fullscreen_on_switch
+            else Cocoa.NSControlStateValueOff
+        )
+        content.addSubview_(fs_chk)
+        self._auto_fullscreen_checkbox = fs_chk
+
+        hold_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Hold Caps 2s Quick Assign",
+            self._delegate,
+            "capsHoldToggled:",
+        )
+        hold_chk.setFrame_(Cocoa.NSMakeRect(322.0, opts_y, 215.0, 22.0))
+        hold_chk.setState_(
+            Cocoa.NSControlStateValueOn
+            if self._store.trigger.enable_caps_hold_assign
+            else Cocoa.NSControlStateValueOff
+        )
+        content.addSubview_(hold_chk)
+        self._caps_hold_checkbox = hold_chk
+
+        # Bottom row: Double-Caps trigger interval + status feedback + repair + quit
+        row5_y = 14.0
         trig_lbl = Cocoa.NSTextField.labelWithString_("Double-Caps (ms):")
         trig_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row5_y + 3.0, 124.0, 22.0))
         content.addSubview_(trig_lbl)
@@ -297,22 +332,8 @@ class AssignmentEditorController:
         iv_btn.setFrame_(Cocoa.NSMakeRect(212.0, row5_y, 98.0, 28.0))
         content.addSubview_(iv_btn)
 
-        hold_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
-            "Hold Caps 2s Quick Assign",
-            self._delegate,
-            "capsHoldToggled:",
-        )
-        hold_chk.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, 198.0, 22.0))
-        hold_chk.setState_(
-            Cocoa.NSControlStateValueOn
-            if self._store.trigger.enable_caps_hold_assign
-            else Cocoa.NSControlStateValueOff
-        )
-        content.addSubview_(hold_chk)
-        self._caps_hold_checkbox = hold_chk
-
         status_lbl = Cocoa.NSTextField.labelWithString_("")
-        status_lbl.setFrame_(Cocoa.NSMakeRect(528.0, row5_y + 3.0, win_w - 686.0, 22.0))
+        status_lbl.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, win_w - 480.0, 22.0))
         status_lbl.setFont_(theme.font_ui(12.0, bold=True))
         content.addSubview_(status_lbl)
         self._status_label = status_lbl
@@ -360,6 +381,12 @@ class AssignmentEditorController:
         )
 
         self._interval_field.setStringValue_(str(self._store.trigger.interval_ms))
+        if self._auto_fullscreen_checkbox is not None:
+            self._auto_fullscreen_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.auto_fullscreen_on_switch
+                else Cocoa.NSControlStateValueOff
+            )
         if self._caps_hold_checkbox is not None:
             self._caps_hold_checkbox.setState_(
                 Cocoa.NSControlStateValueOn
@@ -620,6 +647,23 @@ class AssignmentEditorController:
             self._set_feedback(f"Invalid interval: {exc}", is_error=True)
             return
         self._set_feedback(f"Saved double-Caps interval: {ms} ms", is_error=False)
+        self._on_config_updated()
+
+    def _handle_toggle_auto_fullscreen(self) -> None:
+        if self._auto_fullscreen_checkbox is None:
+            return
+        enabled = bool(
+            self._auto_fullscreen_checkbox.state() == Cocoa.NSControlStateValueOn
+        )
+        try:
+            self._store.set_auto_fullscreen_on_switch(enabled)
+        except Exception as exc:
+            self._set_feedback(f"Could not save option: {exc}", is_error=True)
+            return
+        state_txt = "enabled" if enabled else "disabled"
+        self._set_feedback(
+            f"Switch Target Window to Full Screen {state_txt}", is_error=False
+        )
         self._on_config_updated()
 
     def _handle_toggle_caps_hold(self) -> None:

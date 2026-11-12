@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
@@ -43,6 +43,7 @@ class AppConfig:
 
     schema_version: int = SCHEMA_VERSION
     trigger: TriggerConfig = TriggerConfig()
+    auto_fullscreen_on_switch: bool = False
     bindings: tuple[AppBinding, ...] = ()
 
 
@@ -152,10 +153,18 @@ def parse_config_dict(raw: Any) -> AppConfig:
         seen_slots[binding.slot_key] = binding
         parsed_bindings.append(binding)
 
+    raw_auto_fs = raw.get(
+        "auto_fullscreen_on_switch",
+        raw_trigger.get("auto_fullscreen_on_switch", False),
+    )
+    if not isinstance(raw_auto_fs, bool):
+        raise ConfigValidationError("'auto_fullscreen_on_switch' must be a boolean.")
+
     parsed_bindings.sort(key=lambda b: (0 if b.layer is Layer.BASE else 1, b.key))
     return AppConfig(
         schema_version=SCHEMA_VERSION,
         trigger=trigger,
+        auto_fullscreen_on_switch=raw_auto_fs,
         bindings=tuple(parsed_bindings),
     )
 
@@ -187,11 +196,14 @@ def serialize_config_dict(config: AppConfig) -> dict[str, Any]:
     elif config.trigger.hold_assign_ms != 2000:
         trigger_out["hold_assign_ms"] = config.trigger.hold_assign_ms
 
-    return {
+    out: dict[str, Any] = {
         "schema_version": config.schema_version,
         "trigger": trigger_out,
-        "bindings": bindings_out,
     }
+    if config.auto_fullscreen_on_switch:
+        out["auto_fullscreen_on_switch"] = True
+    out["bindings"] = bindings_out
+    return out
 
 
 class BindingStore:
@@ -228,6 +240,11 @@ class BindingStore:
     def trigger(self) -> TriggerConfig:
         with self._lock:
             return self._config.trigger
+
+    @property
+    def auto_fullscreen_on_switch(self) -> bool:
+        with self._lock:
+            return self._config.auto_fullscreen_on_switch
 
     @property
     def load_error(self) -> str | None:
@@ -332,11 +349,7 @@ class BindingStore:
             updated.append(binding)
             updated.sort(key=lambda b: (0 if b.layer is Layer.BASE else 1, b.key))
 
-            new_cfg = AppConfig(
-                schema_version=SCHEMA_VERSION,
-                trigger=self._config.trigger,
-                bindings=tuple(updated),
-            )
+            new_cfg = replace(self._config, bindings=tuple(updated))
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg
@@ -351,11 +364,7 @@ class BindingStore:
                 for b in self._config.bindings
                 if not (b.key == norm and b.layer is layer)
             )
-            new_cfg = AppConfig(
-                schema_version=SCHEMA_VERSION,
-                trigger=self._config.trigger,
-                bindings=updated,
-            )
+            new_cfg = replace(self._config, bindings=updated)
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg
@@ -364,17 +373,8 @@ class BindingStore:
         """Update and persist the double-Caps trigger interval in milliseconds."""
         with self._lock:
             self._ensure_not_corrupted_locked()
-            new_trigger = TriggerConfig(
-                kind=self._config.trigger.kind,
-                interval_ms=interval_ms,
-                enable_caps_hold_assign=self._config.trigger.enable_caps_hold_assign,
-                hold_assign_ms=self._config.trigger.hold_assign_ms,
-            )
-            new_cfg = AppConfig(
-                schema_version=SCHEMA_VERSION,
-                trigger=new_trigger,
-                bindings=self._config.bindings,
-            )
+            new_trigger = replace(self._config.trigger, interval_ms=interval_ms)
+            new_cfg = replace(self._config, trigger=new_trigger)
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg
@@ -383,17 +383,19 @@ class BindingStore:
         """Update and persist the optional 2-second Caps Lock hold quick-assign toggle."""
         with self._lock:
             self._ensure_not_corrupted_locked()
-            new_trigger = TriggerConfig(
-                kind=self._config.trigger.kind,
-                interval_ms=self._config.trigger.interval_ms,
-                enable_caps_hold_assign=bool(enabled),
-                hold_assign_ms=self._config.trigger.hold_assign_ms,
+            new_trigger = replace(
+                self._config.trigger, enable_caps_hold_assign=bool(enabled)
             )
-            new_cfg = AppConfig(
-                schema_version=SCHEMA_VERSION,
-                trigger=new_trigger,
-                bindings=self._config.bindings,
-            )
+            new_cfg = replace(self._config, trigger=new_trigger)
+            self._write_atomic_locked(new_cfg)
+            self._config = new_cfg
+            return new_cfg
+
+    def set_auto_fullscreen_on_switch(self, enabled: bool) -> AppConfig:
+        """Update and persist whether activated target windows automatically enter Full Screen."""
+        with self._lock:
+            self._ensure_not_corrupted_locked()
+            new_cfg = replace(self._config, auto_fullscreen_on_switch=bool(enabled))
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg

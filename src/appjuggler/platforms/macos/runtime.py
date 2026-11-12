@@ -158,6 +158,7 @@ class MacOSAppRuntime:
             on_edit_assignments=self._assignment_editor.show_window,
             on_reload_config=self._reload_config_from_disk,
             on_quit=self.shutdown_and_terminate,
+            on_toggle_auto_fullscreen=self._toggle_auto_fullscreen_from_menu,
         )
 
         self._executor = ThreadPoolExecutor(
@@ -486,7 +487,11 @@ class MacOSAppRuntime:
     def _task_activate_window(self, op_token: int, binding, slot) -> None:
         if self._controller.op_token != op_token:
             return
-        outcome = self._window_activator.activate_window(slot.window, timeout_sec=0.9)
+        outcome = self._window_activator.activate_window(
+            slot.window,
+            timeout_sec=0.9,
+            make_fullscreen=self._store.auto_fullscreen_on_switch,
+        )
         if outcome.stale_window:
             discovered = self._window_registry.discover_windows(
                 binding.bundle_id, timeout_sec=0.5
@@ -672,7 +677,22 @@ class MacOSAppRuntime:
             for r in self._app_registry.running_apps()
             if r.bundle_id is None or r.bundle_id not in bound
         )
-        self._status_bar.update_status(st, unassigned_count=unassigned)
+        self._status_bar.update_status(
+            st,
+            unassigned_count=unassigned,
+            auto_fullscreen=self._store.auto_fullscreen_on_switch,
+        )
+
+    def _toggle_auto_fullscreen_from_menu(self) -> None:
+        new_val = not self._store.auto_fullscreen_on_switch
+        try:
+            self._store.set_auto_fullscreen_on_switch(new_val)
+        except Exception:
+            logger.exception("Failed toggling auto_fullscreen_on_switch")
+            return
+        self._sync_config_to_controller()
+        if self._assignment_editor.is_visible():
+            self._assignment_editor.refresh_data()
 
     def _handle_permissions_revoked_on_main(self) -> None:
         self._input_adapter.stop()
