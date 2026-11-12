@@ -38,12 +38,37 @@ class KeyboardMapGridView(Cocoa.NSView):
         self._conflict_bids: frozenset[str] = frozenset()
         self._icon_provider: Callable[[str, str | None], object | None] | None = None
         self._selected_key: str | None = None
+        self._hovered_key: str | None = None
         self._on_key_clicked: Callable[[str], None] | None = None
+        self._mouse_interactive: bool = True
+        self._select_on_click: bool = True
+        self._tracking_area = None
         self._key_rects: dict[str, Cocoa.NSRect] = {}
         return self
 
     def isFlipped(self) -> bool:
         return True
+
+    def acceptsFirstMouse_(self, _event) -> bool:
+        return bool(self._mouse_interactive and self._on_key_clicked is not None)
+
+    def updateTrackingAreas(self) -> None:
+        objc.super(KeyboardMapGridView, self).updateTrackingAreas()
+        if self._tracking_area is not None:
+            self.removeTrackingArea_(self._tracking_area)
+            self._tracking_area = None
+        if self._mouse_interactive and self._on_key_clicked is not None:
+            opts = (
+                Cocoa.NSTrackingMouseMoved
+                | Cocoa.NSTrackingMouseEnteredAndExited
+                | Cocoa.NSTrackingActiveAlways
+                | Cocoa.NSTrackingInVisibleRect
+            )
+            area = Cocoa.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                Cocoa.NSZeroRect, opts, self, None
+            )
+            self.addTrackingArea_(area)
+            self._tracking_area = area
 
     @objc.python_method
     def configure(
@@ -56,6 +81,8 @@ class KeyboardMapGridView(Cocoa.NSView):
         icon_provider: Callable[[str, str | None], object | None] | None = None,
         selected_key: str | None = None,
         on_key_clicked: Callable[[str], None] | None = None,
+        mouse_interactive: bool = True,
+        select_on_click: bool = True,
     ) -> None:
         self._layer = active_layer
         self._bindings_by_slot = {b.slot_key: b for b in bindings}
@@ -64,8 +91,12 @@ class KeyboardMapGridView(Cocoa.NSView):
         if icon_provider is not None:
             self._icon_provider = icon_provider
         self._selected_key = selected_key
-        if on_key_clicked is not None:
-            self._on_key_clicked = on_key_clicked
+        self._on_key_clicked = on_key_clicked
+        self._mouse_interactive = bool(mouse_interactive)
+        self._select_on_click = bool(select_on_click)
+        if not self._mouse_interactive or self._on_key_clicked is None:
+            self._hovered_key = None
+        self.updateTrackingAreas()
         self.setNeedsDisplay_(True)
 
     @objc.python_method
@@ -76,6 +107,19 @@ class KeyboardMapGridView(Cocoa.NSView):
     @objc.python_method
     def set_selected_key(self, key: str | None) -> None:
         self._selected_key = key.upper() if key else None
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def set_mouse_interactive(
+        self,
+        enabled: bool,
+        on_key_clicked: Callable[[str], None] | None = None,
+    ) -> None:
+        self._mouse_interactive = bool(enabled)
+        self._on_key_clicked = on_key_clicked if enabled else None
+        if not self._mouse_interactive or self._on_key_clicked is None:
+            self._hovered_key = None
+        self.updateTrackingAreas()
         self.setNeedsDisplay_(True)
 
     @staticmethod
@@ -102,6 +146,12 @@ class KeyboardMapGridView(Cocoa.NSView):
     def _draw_keycap(self, key_char: str, rect: Cocoa.NSRect) -> None:
         binding = self._bindings_by_slot.get((key_char, self._layer))
         is_selected = self._selected_key == key_char
+        is_hovered = (
+            self._mouse_interactive
+            and self._on_key_clicked is not None
+            and self._hovered_key == key_char
+            and not is_selected
+        )
         is_running = (
             binding is not None and binding.bundle_id in self._running_bids
         )
@@ -113,6 +163,14 @@ class KeyboardMapGridView(Cocoa.NSView):
             bg = theme.KEY_SELECTED_BG
             border = theme.KEY_SELECTED_BORDER
             lw = 2.0
+        elif is_hovered and binding is not None:
+            bg = theme.KEY_SELECTED_BG
+            border = theme.KEY_SELECTED_BORDER
+            lw = 1.8
+        elif is_hovered:
+            bg = theme.rgba(52, 62, 82, 0.72)
+            border = theme.ACCENT_BLUE
+            lw = 1.5
         elif binding is None:
             bg = theme.KEY_UNASSIGNED_BG
             border = theme.KEY_UNASSIGNED_BORDER
@@ -195,16 +253,39 @@ class KeyboardMapGridView(Cocoa.NSView):
             align=Cocoa.NSTextAlignmentCenter,
         )
 
-    def mouseDown_(self, event) -> None:
-        if self._on_key_clicked is None:
-            return
+    @objc.python_method
+    def _hit_test_key(self, event) -> str | None:
         pt = self.convertPoint_fromView_(event.locationInWindow(), None)
         for key_char, rect in self._key_rects.items():
             if Cocoa.NSPointInRect(pt, rect):
+                return key_char
+        return None
+
+    def mouseMoved_(self, event) -> None:
+        if not self._mouse_interactive or self._on_key_clicked is None:
+            return
+        hovered = self._hit_test_key(event)
+        if hovered != self._hovered_key:
+            self._hovered_key = hovered
+            self.setNeedsDisplay_(True)
+
+    def mouseEntered_(self, event) -> None:
+        self.mouseMoved_(event)
+
+    def mouseExited_(self, _event) -> None:
+        if self._hovered_key is not None:
+            self._hovered_key = None
+            self.setNeedsDisplay_(True)
+
+    def mouseDown_(self, event) -> None:
+        if not self._mouse_interactive or self._on_key_clicked is None:
+            return
+        key_char = self._hit_test_key(event)
+        if key_char is not None:
+            if self._select_on_click:
                 self._selected_key = key_char
                 self.setNeedsDisplay_(True)
-                self._on_key_clicked(key_char)
-                return
+            self._on_key_clicked(key_char)
 
 
 class _NonActivatingHUDPanel(Cocoa.NSPanel):
@@ -243,6 +324,17 @@ class _HUDContentView(Cocoa.NSView):
         self.assign_target_app: AppRecord | None = None
         self.assign_conflict_existing: AppBinding | None = None
 
+        # Optional Mouse Hover & Click state (disabled by default)
+        self.mouse_enabled: bool = False
+        self.on_layer_pill_clicked: Callable[[], None] | None = None
+        self.on_window_slot_hovered: Callable[[int], None] | None = None
+        self.on_window_slot_clicked: Callable[[int], None] | None = None
+        self.on_window_scroll: Callable[[int], None] | None = None
+        self._tracking_area = None
+        self._layer_pill_rect: Cocoa.NSRect | None = None
+        self._window_row_rects: dict[int, Cocoa.NSRect] = {}
+        self._scroll_accum: float = 0.0
+
         self.grid_view = KeyboardMapGridView.alloc().initWithFrame_(Cocoa.NSZeroRect)
         self.addSubview_(self.grid_view)
         return self
@@ -250,7 +342,30 @@ class _HUDContentView(Cocoa.NSView):
     def isFlipped(self) -> bool:
         return True
 
+    def acceptsFirstMouse_(self, _event) -> bool:
+        return bool(self.mouse_enabled)
+
+    def updateTrackingAreas(self) -> None:
+        objc.super(_HUDContentView, self).updateTrackingAreas()
+        if self._tracking_area is not None:
+            self.removeTrackingArea_(self._tracking_area)
+            self._tracking_area = None
+        if self.mouse_enabled:
+            opts = (
+                Cocoa.NSTrackingMouseMoved
+                | Cocoa.NSTrackingMouseEnteredAndExited
+                | Cocoa.NSTrackingActiveAlways
+                | Cocoa.NSTrackingInVisibleRect
+            )
+            area = Cocoa.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                Cocoa.NSZeroRect, opts, self, None
+            )
+            self.addTrackingArea_(area)
+            self._tracking_area = area
+
     def drawRect_(self, _dirty_rect) -> None:
+        self._layer_pill_rect = None
+        self._window_row_rects.clear()
         bounds = self.bounds()
         theme.fill_round_rect(
             Cocoa.NSInsetRect(bounds, 1.0, 1.0),
@@ -284,6 +399,7 @@ class _HUDContentView(Cocoa.NSView):
 
         is_shift = self.active_layer is Layer.SHIFT
         pill_rect = Cocoa.NSMakeRect(132.0, 13.0, 168.0, 22.0)
+        self._layer_pill_rect = pill_rect
         pill_bg = (
             theme.rgba(245, 166, 35, 0.22)
             if is_shift
@@ -299,11 +415,14 @@ class _HUDContentView(Cocoa.NSView):
             align=Cocoa.NSTextAlignmentCenter,
         )
 
-        header_hint = (
-            "⇧ Layer 2  ·  Tab Quick Assign  ·  , Edit Assignments  ·  Esc Cancel"
-            if self.quick_assign_enabled
-            else "⇧ Layer 2  ·  , Edit Assignments  ·  Esc Cancel"
-        )
+        hint_parts: list[str] = []
+        if self.mouse_enabled:
+            hint_parts.append("Click/A–Z Select")
+        hint_parts.append("⇧ Layer 2")
+        if self.quick_assign_enabled:
+            hint_parts.append("Tab Quick Assign")
+        hint_parts.extend([", Edit Assignments", "Esc Cancel"])
+        header_hint = "  ·  ".join(hint_parts)
         theme.draw_text(
             header_hint,
             Cocoa.NSMakeRect(310.0, 16.0, bounds.size.width - 332.0, 18.0),
@@ -359,6 +478,7 @@ class _HUDContentView(Cocoa.NSView):
 
         is_shift = self.active_layer is Layer.SHIFT
         pill_rect = Cocoa.NSMakeRect(420.0, 13.0, 168.0, 22.0)
+        self._layer_pill_rect = pill_rect
         pill_bg = (
             theme.rgba(245, 166, 35, 0.22)
             if is_shift
@@ -566,8 +686,13 @@ class _HUDContentView(Cocoa.NSView):
             theme.font_ui(15.0, bold=True),
             theme.TEXT_PRIMARY,
         )
+        win_hint = (
+            "Hover/↑↓ Select  ·  Click/Enter/1–9 Activate  ·  Esc"
+            if self.mouse_enabled
+            else "↑/↓ Select  ·  Enter or 1–9 Activate  ·  Esc Cancel"
+        )
         theme.draw_text(
-            "↑/↓ Select  ·  Enter or 1–9 Activate  ·  Esc Cancel",
+            win_hint,
             Cocoa.NSMakeRect(340.0, 19.0, bounds.size.width - 360.0, 18.0),
             theme.font_ui(11.5, bold=False),
             theme.TEXT_SECONDARY,
@@ -610,6 +735,7 @@ class _HUDContentView(Cocoa.NSView):
         for slot in visible_slots:
             is_sel = self.selected_slot == slot.slot_number
             row_rect = Cocoa.NSMakeRect(18.0, y, bounds.size.width - 36.0, row_h)
+            self._window_row_rects[slot.slot_number] = row_rect
             bg = theme.KEY_SELECTED_BG if is_sel else theme.KEY_CLOSED_BG
             border = theme.KEY_SELECTED_BORDER if is_sel else theme.KEY_CLOSED_BORDER
             theme.fill_round_rect(row_rect, 9.0, bg, border, 1.5 if is_sel else 1.0)
@@ -720,6 +846,56 @@ class _HUDContentView(Cocoa.NSView):
             theme.TEXT_PRIMARY,
         )
 
+    def mouseMoved_(self, event) -> None:
+        if not self.mouse_enabled:
+            return
+        if self.mode == "windows" and self.on_window_slot_hovered is not None:
+            pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+            for slot_num, rect in self._window_row_rects.items():
+                if Cocoa.NSPointInRect(pt, rect):
+                    if self.selected_slot != slot_num:
+                        self.on_window_slot_hovered(slot_num)
+                    return
+
+    def mouseEntered_(self, event) -> None:
+        self.mouseMoved_(event)
+
+    def mouseDown_(self, event) -> None:
+        if not self.mouse_enabled:
+            return
+        pt = self.convertPoint_fromView_(event.locationInWindow(), None)
+        if self.mode in ("map", "assign_keymap") and self._layer_pill_rect is not None:
+            if Cocoa.NSPointInRect(pt, self._layer_pill_rect):
+                if self.on_layer_pill_clicked is not None:
+                    self.on_layer_pill_clicked()
+                return
+        if self.mode == "windows" and self.on_window_slot_clicked is not None:
+            for slot_num, rect in self._window_row_rects.items():
+                if Cocoa.NSPointInRect(pt, rect):
+                    self.on_window_slot_clicked(slot_num)
+                    return
+
+    def scrollWheel_(self, event) -> None:
+        if (
+            not self.mouse_enabled
+            or self.mode != "windows"
+            or self.on_window_scroll is None
+            or len(self.slots) <= 1
+        ):
+            return
+        dy = float(event.scrollingDeltaY())
+        if abs(dy) < 0.05:
+            return
+        if event.hasPreciseScrollingDeltas():
+            self._scroll_accum += dy
+            if abs(self._scroll_accum) >= 22.0:
+                step = 1 if self._scroll_accum < 0 else -1
+                self._scroll_accum = 0.0
+                self.on_window_scroll(step)
+        else:
+            step = 1 if dy < 0 else -1
+            self.on_window_scroll(step)
+
 
 class _BannerTimerTarget(Cocoa.NSObject):
     def initWithCallback_(self, callback: Callable[[], None]):
@@ -745,6 +921,80 @@ class MacOSOverlayPresenter(OverlayPresenter):
         self._timer_target = _BannerTimerTarget.alloc().initWithCallback_(
             self._on_banner_timer_fired
         )
+        self._mouse_enabled: bool = False
+        self._on_app_key_clicked: Callable[[str, Layer], None] | None = None
+        self._on_layer_pill_clicked: Callable[[], None] | None = None
+        self._on_window_slot_hovered: Callable[[int], None] | None = None
+        self._on_window_slot_clicked: Callable[[int], None] | None = None
+        self._on_window_scroll: Callable[[int], None] | None = None
+
+    def set_mouse_callbacks(
+        self,
+        *,
+        on_app_key_clicked: Callable[[str, Layer], None] | None = None,
+        on_layer_pill_clicked: Callable[[], None] | None = None,
+        on_window_slot_hovered: Callable[[int], None] | None = None,
+        on_window_slot_clicked: Callable[[int], None] | None = None,
+        on_window_scroll: Callable[[int], None] | None = None,
+    ) -> None:
+        self._on_app_key_clicked = on_app_key_clicked
+        self._on_layer_pill_clicked = on_layer_pill_clicked
+        self._on_window_slot_hovered = on_window_slot_hovered
+        self._on_window_slot_clicked = on_window_slot_clicked
+        self._on_window_scroll = on_window_scroll
+        if self._content is not None:
+            self._wire_content_callbacks(self._content)
+
+    def set_mouse_enabled(self, enabled: bool) -> None:
+        self._mouse_enabled = bool(enabled)
+        if self._panel is not None and self._content is not None:
+            self._apply_mouse_mode_on_main(
+                interactive_mode=self._content.mode
+                in ("map", "windows", "assign_keymap")
+            )
+
+    def _wire_content_callbacks(self, content: _HUDContentView) -> None:
+        content.on_layer_pill_clicked = self._on_layer_pill_clicked
+        content.on_window_slot_hovered = self._on_window_slot_hovered
+        content.on_window_slot_clicked = self._on_window_slot_clicked
+        content.on_window_scroll = self._on_window_scroll
+
+    def _handle_hud_grid_key_clicked(self, key_char: str) -> None:
+        if not self._mouse_enabled or self._on_app_key_clicked is None:
+            return
+        shift_down = bool(
+            Cocoa.NSEvent.modifierFlags() & Cocoa.NSEventModifierFlagShift
+        )
+        layer = (
+            Layer.SHIFT
+            if (
+                shift_down
+                or (
+                    self._content is not None
+                    and self._content.active_layer is Layer.SHIFT
+                )
+            )
+            else Layer.BASE
+        )
+        self._on_app_key_clicked(key_char, layer)
+
+    def _apply_mouse_mode_on_main(self, *, interactive_mode: bool) -> None:
+        if self._panel is None or self._content is None:
+            return
+        active = bool(self._mouse_enabled and interactive_mode)
+        self._panel.setIgnoresMouseEvents_(not active)
+        self._panel.setAcceptsMouseMovedEvents_(active)
+        if self._content.mouse_enabled != self._mouse_enabled:
+            self._content.mouse_enabled = self._mouse_enabled
+            self._content.updateTrackingAreas()
+            if self._content.mode in ("map", "assign_keymap"):
+                self._content.grid_view.set_mouse_interactive(
+                    self._mouse_enabled,
+                    on_key_clicked=(
+                        self._handle_hud_grid_key_clicked if self._mouse_enabled else None
+                    ),
+                )
+            self._content.setNeedsDisplay_(True)
 
     def _ensure_panel_on_main(self) -> tuple[_NonActivatingHUDPanel, _HUDContentView]:
         if self._panel is not None and self._content is not None:
@@ -767,6 +1017,8 @@ class MacOSOverlayPresenter(OverlayPresenter):
         panel.setOpaque_(False)
         panel.setBackgroundColor_(Cocoa.NSColor.clearColor())
         panel.setHasShadow_(True)
+        panel.setIgnoresMouseEvents_(not self._mouse_enabled)
+        panel.setAcceptsMouseMovedEvents_(self._mouse_enabled)
         panel.setLevel_(Cocoa.NSPopUpMenuWindowLevel)
         panel.setCollectionBehavior_(
             Cocoa.NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -777,6 +1029,9 @@ class MacOSOverlayPresenter(OverlayPresenter):
 
         content = _HUDContentView.alloc().initWithFrame_(rect)
         content.icon_provider = self._app_registry.app_icon_for_bundle
+        content.mouse_enabled = self._mouse_enabled
+        content.updateTrackingAreas()
+        self._wire_content_callbacks(content)
         panel.setContentView_(content)
 
         self._panel = panel
@@ -856,6 +1111,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.active_layer = active_layer
         content.notice = notice
         content.quick_assign_enabled = quick_assign_enabled
+        self._apply_mouse_mode_on_main(interactive_mode=True)
 
         gw, gh = KeyboardMapGridView.required_size()
         pw, ph = self._map_panel_size(bool(notice))
@@ -870,6 +1126,9 @@ class MacOSOverlayPresenter(OverlayPresenter):
             duplicate_conflicts=duplicate_conflicts,
             icon_provider=self._app_registry.app_icon_for_bundle,
             selected_key=None,
+            on_key_clicked=self._handle_hud_grid_key_clicked if self._mouse_enabled else None,
+            mouse_interactive=self._mouse_enabled,
+            select_on_click=False,
         )
         content.setNeedsDisplay_(True)
         panel.orderFrontRegardless()
@@ -898,6 +1157,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.assign_bindings = bindings
         content.notice = notice
         content.grid_view.setHidden_(True)
+        self._apply_mouse_mode_on_main(interactive_mode=False)
 
         visible_rows = min(9, max(1, len(apps)))
         extra_notice = 36.0 if notice else 0.0
@@ -945,6 +1205,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.assign_target_app = app
         content.active_layer = active_layer
         content.assign_conflict_existing = conflict_existing
+        self._apply_mouse_mode_on_main(interactive_mode=True)
 
         gw, gh = KeyboardMapGridView.required_size()
         pw, ph = self._map_panel_size(conflict_existing is not None)
@@ -959,6 +1220,9 @@ class MacOSOverlayPresenter(OverlayPresenter):
             duplicate_conflicts=duplicate_conflicts,
             icon_provider=self._app_registry.app_icon_for_bundle,
             selected_key=conflict_existing.key if conflict_existing else None,
+            on_key_clicked=self._handle_hud_grid_key_clicked if self._mouse_enabled else None,
+            mouse_interactive=self._mouse_enabled,
+            select_on_click=False,
         )
         content.setNeedsDisplay_(True)
         panel.orderFrontRegardless()
@@ -969,6 +1233,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.mode = "launching"
         content.selected_binding = binding
         content.grid_view.setHidden_(True)
+        self._apply_mouse_mode_on_main(interactive_mode=False)
         self._resize_and_center(panel, content, 540.0, 86.0)
         content.setNeedsDisplay_(True)
         panel.orderFrontRegardless()
@@ -987,7 +1252,9 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.slots = slots
         content.selected_slot = selected_slot
         content.notice = notice
+        content._scroll_accum = 0.0
         content.grid_view.setHidden_(True)
+        self._apply_mouse_mode_on_main(interactive_mode=True)
 
         visible_rows = min(9, max(1, len(slots)))
         extra_notice = 36.0 if notice else 0.0
@@ -1041,6 +1308,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         content.banner_level = level
         content.banner_message = message
         content.grid_view.setHidden_(True)
+        self._apply_mouse_mode_on_main(interactive_mode=False)
         self._resize_and_center(panel, content, 620.0, 66.0)
         content.setNeedsDisplay_(True)
         panel.orderFrontRegardless()

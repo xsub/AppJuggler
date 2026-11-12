@@ -135,3 +135,18 @@ def test_reload_if_modified_detects_external_edits(tmp_path: Path) -> None:
     store.set_auto_fullscreen_on_switch(False)
     assert store.auto_fullscreen_on_switch is False
     assert "auto_fullscreen_on_switch" not in cfg_path.read_text(encoding="utf-8")
+
+    # Mouse hover & click HUD selection is disabled by default and omitted when false
+    assert store.enable_mouse_selection is False
+    assert "enable_mouse_selection" not in cfg_path.read_text(encoding="utf-8")
+
+    store.set_enable_mouse_selection(True)
+    assert store.enable_mouse_selection is True
+    assert '"enable_mouse_selection": true' in cfg_path.read_text(encoding="utf-8")
+
+    reloaded_mouse = BindingStore(path=cfg_path, seed_defaults_if_missing=False)
+    assert reloaded_mouse.enable_mouse_selection is True
+
+    store.set_enable_mouse_selection(False)
+    assert store.enable_mouse_selection is False
+    assert "enable_mouse_selection" not in cfg_path.read_text(encoding="utf-8")

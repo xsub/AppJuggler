@@ -111,6 +111,9 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
     def autoFullscreenToggled_(self, _sender) -> None:
         self._cb["on_toggle_auto_fullscreen"]()
 
+    def mouseSelectionToggled_(self, _sender) -> None:
+        self._cb["on_toggle_mouse_selection"]()
+
     def repairConfigClicked_(self, _sender) -> None:
         self._cb["on_repair_config"]()
 
@@ -155,6 +158,7 @@ class AssignmentEditorController:
         self._conflict_label = None
         self._interval_field = None
         self._auto_fullscreen_checkbox = None
+        self._mouse_selection_checkbox = None
         self._caps_hold_checkbox = None
         self._status_label = None
         self._repair_btn = None
@@ -174,7 +178,7 @@ class AssignmentEditorController:
     def _build_window(self) -> None:
         gw, gh = KeyboardMapGridView.required_size()
         win_w = gw + 40.0
-        win_h = gh + 340.0
+        win_h = gh + 362.0
         style = (
             Cocoa.NSWindowStyleMaskTitled
             | Cocoa.NSWindowStyleMaskClosable
@@ -201,6 +205,7 @@ class AssignmentEditorController:
                 "on_refresh_apps": self.refresh_data,
                 "on_save_interval": self._handle_save_interval,
                 "on_toggle_auto_fullscreen": self._handle_toggle_auto_fullscreen,
+                "on_toggle_mouse_selection": self._handle_toggle_mouse_selection,
                 "on_toggle_caps_hold": self._handle_toggle_caps_hold,
                 "on_repair_config": self._handle_repair_config,
                 "on_quit_app": self._on_quit_app,
@@ -335,19 +340,21 @@ class AssignmentEditorController:
 
         # Horizontal divider separating binding editor from options & branding footer
         sep = Cocoa.NSBox.alloc().initWithFrame_(
-            Cocoa.NSMakeRect(20.0, 106.0, win_w - 40.0, 1.0)
+            Cocoa.NSMakeRect(20.0, 128.0, win_w - 40.0, 1.0)
         )
         sep.setBoxType_(Cocoa.NSBoxSeparator)
         content.addSubview_(sep)
 
-        # Options row: Switch Target Window to Full Screen + Optional 2s Caps-hold + Branding
-        opts_y = 64.0
+        # Optional checkboxes (left) + Branding card (right)
+        opts_top_y = 88.0
+        opts_bot_y = 58.0
+
         fs_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
             "Switch Target Window to Full Screen",
             self._delegate,
             "autoFullscreenToggled:",
         )
-        fs_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_y, 285.0, 22.0))
+        fs_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_top_y, 276.0, 22.0))
         fs_chk.setState_(
             Cocoa.NSControlStateValueOn
             if self._store.auto_fullscreen_on_switch
@@ -356,12 +363,26 @@ class AssignmentEditorController:
         content.addSubview_(fs_chk)
         self._auto_fullscreen_checkbox = fs_chk
 
+        mouse_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Mouse Hover & Click in HUD",
+            self._delegate,
+            "mouseSelectionToggled:",
+        )
+        mouse_chk.setFrame_(Cocoa.NSMakeRect(312.0, opts_top_y, 240.0, 22.0))
+        mouse_chk.setState_(
+            Cocoa.NSControlStateValueOn
+            if self._store.enable_mouse_selection
+            else Cocoa.NSControlStateValueOff
+        )
+        content.addSubview_(mouse_chk)
+        self._mouse_selection_checkbox = mouse_chk
+
         hold_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
             "Hold Caps 2s Quick Assign",
             self._delegate,
             "capsHoldToggled:",
         )
-        hold_chk.setFrame_(Cocoa.NSMakeRect(322.0, opts_y, 215.0, 22.0))
+        hold_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_bot_y, 240.0, 22.0))
         hold_chk.setState_(
             Cocoa.NSControlStateValueOn
             if self._store.trigger.enable_caps_hold_assign
@@ -374,7 +395,7 @@ class AssignmentEditorController:
         badge_w = 122.0
         badge_h = 44.0
         badge_x = win_w - 20.0 - badge_w
-        badge_y = 53.0
+        badge_y = 63.0
 
         eng_lbl = Cocoa.NSTextField.labelWithString_("AI ENGINEERED BY:")
         eng_lbl.setFont_(theme.font_ui(11.0, bold=True))
@@ -474,6 +495,12 @@ class AssignmentEditorController:
             self._auto_fullscreen_checkbox.setState_(
                 Cocoa.NSControlStateValueOn
                 if self._store.auto_fullscreen_on_switch
+                else Cocoa.NSControlStateValueOff
+            )
+        if self._mouse_selection_checkbox is not None:
+            self._mouse_selection_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.enable_mouse_selection
                 else Cocoa.NSControlStateValueOff
             )
         if self._caps_hold_checkbox is not None:
@@ -753,6 +780,21 @@ class AssignmentEditorController:
         self._set_feedback(
             f"Switch Target Window to Full Screen {state_txt}", is_error=False
         )
+        self._on_config_updated()
+
+    def _handle_toggle_mouse_selection(self) -> None:
+        if self._mouse_selection_checkbox is None:
+            return
+        enabled = bool(
+            self._mouse_selection_checkbox.state() == Cocoa.NSControlStateValueOn
+        )
+        try:
+            self._store.set_enable_mouse_selection(enabled)
+        except Exception as exc:
+            self._set_feedback(f"Could not save option: {exc}", is_error=True)
+            return
+        state_txt = "enabled" if enabled else "disabled"
+        self._set_feedback(f"Mouse Hover & Click in HUD {state_txt}", is_error=False)
         self._on_config_updated()
 
     def _handle_toggle_caps_hold(self) -> None:

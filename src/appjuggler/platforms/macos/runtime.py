@@ -28,6 +28,11 @@ from appjuggler.domain.events import (
     InspectAppWindowsCommand,
     LaunchAppCommand,
     LaunchCompleted,
+    MouseClickAppSlot,
+    MouseClickWindowSlot,
+    MouseHoverWindowSlot,
+    MouseScrollWindowSelection,
+    MouseToggleLayer,
     NavCommand,
     OpenAppsForAssignResolved,
     OpenFullAssignmentWindowCommand,
@@ -129,6 +134,7 @@ class MacOSAppRuntime:
         self._controller = NavigationController(
             trigger_interval_ms=store.trigger.interval_ms,
             enable_caps_hold_assign=store.trigger.enable_caps_hold_assign,
+            enable_mouse_selection=store.enable_mouse_selection,
         )
         self._controller.update_bindings(store.bindings)
 
@@ -145,6 +151,22 @@ class MacOSAppRuntime:
 
         self._main = _MainThreadDispatcher.alloc().init()
         self._overlay = MacOSOverlayPresenter(self._app_registry)
+        self._overlay.set_mouse_enabled(store.enable_mouse_selection)
+        self._overlay.set_mouse_callbacks(
+            on_app_key_clicked=lambda key, layer: self._post_backend_event(
+                MouseClickAppSlot(key=key, layer=layer)
+            ),
+            on_layer_pill_clicked=lambda: self._post_backend_event(MouseToggleLayer()),
+            on_window_slot_hovered=lambda slot_num: self._post_backend_event(
+                MouseHoverWindowSlot(slot_number=slot_num)
+            ),
+            on_window_slot_clicked=lambda slot_num: self._post_backend_event(
+                MouseClickWindowSlot(slot_number=slot_num)
+            ),
+            on_window_scroll=lambda delta: self._post_backend_event(
+                MouseScrollWindowSelection(delta=delta)
+            ),
+        )
         self._assignment_editor = AssignmentEditorController(
             store=self._store,
             app_registry=self._app_registry,
@@ -160,6 +182,7 @@ class MacOSAppRuntime:
             on_reload_config=self._reload_config_from_disk,
             on_quit=self.shutdown_and_terminate,
             on_toggle_auto_fullscreen=self._toggle_auto_fullscreen_from_menu,
+            on_toggle_mouse_selection=self._toggle_mouse_selection_from_menu,
         )
 
         self._executor = ThreadPoolExecutor(
@@ -280,6 +303,7 @@ class MacOSAppRuntime:
             self._active_window_list_bundle = None
             if self._store.reload_if_modified():
                 self._sync_config_to_controller()
+            self._overlay.set_mouse_enabled(self._store.enable_mouse_selection)
             running = self._app_registry.running_bundle_ids()
             self._controller.update_running_apps(running)
             self._overlay.show_app_map(
@@ -317,6 +341,7 @@ class MacOSAppRuntime:
             )
         elif isinstance(cmd, ShowWindowListCommand):
             self._active_window_list_bundle = cmd.binding.bundle_id
+            self._overlay.set_mouse_enabled(self._store.enable_mouse_selection)
             self._overlay.show_window_list(
                 binding=cmd.binding,
                 slots=cmd.slots,
@@ -608,8 +633,11 @@ class MacOSAppRuntime:
 
     def _sync_config_to_controller(self) -> None:
         trig = self._store.trigger
+        mouse_enabled = self._store.enable_mouse_selection
         self._controller.set_trigger_interval_ms(trig.interval_ms)
         self._controller.set_caps_hold_assign_enabled(trig.enable_caps_hold_assign)
+        self._controller.set_mouse_selection_enabled(mouse_enabled)
+        self._main.dispatch(lambda enabled=mouse_enabled: self._overlay.set_mouse_enabled(enabled))
         self._input_adapter.set_hold_assign_ms(trig.hold_assign_ms)
         if trig.enable_caps_hold_assign != self._input_adapter.caps_hold_enabled:
             was_running = self._input_adapter.is_running
@@ -707,6 +735,7 @@ class MacOSAppRuntime:
             st,
             unassigned_count=unassigned,
             auto_fullscreen=self._store.auto_fullscreen_on_switch,
+            mouse_selection=self._store.enable_mouse_selection,
         )
 
     def _toggle_auto_fullscreen_from_menu(self) -> None:
@@ -715,6 +744,17 @@ class MacOSAppRuntime:
             self._store.set_auto_fullscreen_on_switch(new_val)
         except Exception:
             logger.exception("Failed toggling auto_fullscreen_on_switch")
+            return
+        self._sync_config_to_controller()
+        if self._assignment_editor.is_visible():
+            self._assignment_editor.refresh_data()
+
+    def _toggle_mouse_selection_from_menu(self) -> None:
+        new_val = not self._store.enable_mouse_selection
+        try:
+            self._store.set_enable_mouse_selection(new_val)
+        except Exception:
+            logger.exception("Failed toggling enable_mouse_selection")
             return
         self._sync_config_to_controller()
         if self._assignment_editor.is_visible():

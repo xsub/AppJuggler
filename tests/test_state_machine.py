@@ -18,6 +18,11 @@ from appjuggler.domain.events import (
     KeyKind,
     LaunchAppCommand,
     LaunchCompleted,
+    MouseClickAppSlot,
+    MouseClickWindowSlot,
+    MouseHoverWindowSlot,
+    MouseScrollWindowSelection,
+    MouseToggleLayer,
     OpenAppsForAssignResolved,
     OpenFullAssignmentWindowCommand,
     RequestOpenAppsForAssignCommand,
@@ -543,3 +548,86 @@ def test_in_hud_comma_opens_editor_by_default_and_tab_requires_opt_in() -> None:
     )
     assert ctrl.state is NavState.QUICK_ASSIGN_APP
     assert isinstance(r_tab.commands[0], RequestOpenAppsForAssignCommand)
+
+
+def test_mouse_selection_disabled_by_default_and_hover_click_works_when_opted_in() -> None:
+    term = AppBinding(
+        key="F", layer=Layer.BASE, bundle_id="com.apple.finder", display_name="Finder"
+    )
+    shift_s = AppBinding(
+        key="S", layer=Layer.SHIFT, bundle_id="com.apple.Safari", display_name="Safari"
+    )
+
+    # 1. Default normal path: enable_mouse_selection is False -> all mouse events are no-ops
+    ctrl = NavigationController(trigger_interval_ms=300)
+    assert ctrl.mouse_selection_enabled is False
+    ctrl.update_bindings((term, shift_s))
+    ctrl.update_running_apps(frozenset({"com.apple.finder"}))
+
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    ctrl.handle_key_event(_caps_event(200, caps_on=False))
+    assert ctrl.state is NavState.APP_SELECTION
+
+    assert ctrl.handle_backend_event(MouseToggleLayer()) == ()
+    assert ctrl.active_layer is Layer.BASE
+    assert ctrl.handle_backend_event(MouseClickAppSlot(key="F", layer=Layer.BASE)) == ()
+    assert ctrl.state is NavState.APP_SELECTION
+
+    # Advance via keyboard to multi-window picker and verify mouse hover/click still ignored when False
+    r_f = ctrl.handle_key_event(_letter_event("F", 240, keycode=3))
+    tok = r_f.commands[0].op_token
+    slots = (_slot(1, "w1", "Downloads"), _slot(2, "w2", "Documents"), _slot(3, "w3", "Desktop"))
+    ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok,
+            bundle_id="com.apple.finder",
+            slots=slots,
+            default_slot=1,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert ctrl.selected_slot == 1
+    assert ctrl.handle_backend_event(MouseHoverWindowSlot(slot_number=3)) == ()
+    assert ctrl.selected_slot == 1
+    assert ctrl.handle_backend_event(MouseClickWindowSlot(slot_number=2)) == ()
+    assert ctrl.state is NavState.WINDOW_SELECTION
+
+    # 2. Opt-in path: enable_mouse_selection=True -> hover highlights, click activates!
+    ctrl.set_mouse_selection_enabled(True)
+    assert ctrl.mouse_selection_enabled is True
+
+    # Hovering window #3 highlights slot 3 without activating
+    hover_cmds = ctrl.handle_backend_event(MouseHoverWindowSlot(slot_number=3))
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert ctrl.selected_slot == 3
+    assert isinstance(hover_cmds[0], UpdateWindowSelectionCommand)
+    assert hover_cmds[0].selected_slot == 3
+
+    # Scrolling wheel up (-1) moves highlight from #3 -> #2
+    scroll_cmds = ctrl.handle_backend_event(MouseScrollWindowSelection(delta=-1))
+    assert ctrl.selected_slot == 2
+    assert isinstance(scroll_cmds[0], UpdateWindowSelectionCommand)
+
+    # Clicking window #3 immediately transitions to ACTIVATION_PENDING and activates #3
+    click_cmds = ctrl.handle_backend_event(MouseClickWindowSlot(slot_number=3))
+    assert ctrl.state is NavState.ACTIVATION_PENDING
+    assert isinstance(click_cmds[0], ActivateWindowCommand)
+    assert click_cmds[0].slot.slot_number == 3
+    ctrl.handle_backend_event(ActivationCompleted(op_token=tok, success=True))
+    assert ctrl.state is NavState.IDLE
+
+    # Open HUD again -> toggle Shift layer via mouse pill -> click Shift+S (closed Safari) -> launches!
+    ctrl.handle_key_event(_caps_event(600, caps_on=True))
+    ctrl.handle_key_event(_caps_event(700, caps_on=False))
+    assert ctrl.state is NavState.APP_SELECTION
+
+    layer_cmds = ctrl.handle_backend_event(MouseToggleLayer())
+    assert ctrl.active_layer is Layer.SHIFT
+    assert isinstance(layer_cmds[0], UpdateAppMapLayerCommand)
+
+    launch_cmds = ctrl.handle_backend_event(MouseClickAppSlot(key="S", layer=Layer.SHIFT))
+    assert ctrl.state is NavState.LAUNCH_PENDING
+    assert isinstance(launch_cmds[0], LaunchAppCommand)
+    assert launch_cmds[0].binding.bundle_id == "com.apple.Safari"

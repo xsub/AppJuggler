@@ -261,6 +261,35 @@ class SystemInterruptEvent:
     reason: str
 
 
+# --- Optional Mouse HUD Selection Events (gated on enable_mouse_selection) ---
+
+
+@dataclass(frozen=True)
+class MouseClickAppSlot:
+    key: str
+    layer: Layer
+
+
+@dataclass(frozen=True)
+class MouseToggleLayer:
+    pass
+
+
+@dataclass(frozen=True)
+class MouseHoverWindowSlot:
+    slot_number: int
+
+
+@dataclass(frozen=True)
+class MouseClickWindowSlot:
+    slot_number: int
+
+
+@dataclass(frozen=True)
+class MouseScrollWindowSelection:
+    delta: int
+
+
 BackendEvent = (
     AppWindowsResolved
     | WindowListRefreshed
@@ -271,4 +300,9 @@ BackendEvent = (
     | EnterAssignmentEditing
     | ExitAssignmentEditing
     | SystemInterruptEvent
+    | MouseClickAppSlot
+    | MouseToggleLayer
+    | MouseHoverWindowSlot
+    | MouseClickWindowSlot
+    | MouseScrollWindowSelection
 )

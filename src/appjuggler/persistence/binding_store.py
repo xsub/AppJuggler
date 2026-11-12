@@ -44,6 +44,7 @@ class AppConfig:
     schema_version: int = SCHEMA_VERSION
     trigger: TriggerConfig = TriggerConfig()
     auto_fullscreen_on_switch: bool = False
+    enable_mouse_selection: bool = False
     bindings: tuple[AppBinding, ...] = ()
 
 
@@ -160,11 +161,19 @@ def parse_config_dict(raw: Any) -> AppConfig:
     if not isinstance(raw_auto_fs, bool):
         raise ConfigValidationError("'auto_fullscreen_on_switch' must be a boolean.")
 
+    raw_mouse_sel = raw.get(
+        "enable_mouse_selection",
+        raw_trigger.get("enable_mouse_selection", False),
+    )
+    if not isinstance(raw_mouse_sel, bool):
+        raise ConfigValidationError("'enable_mouse_selection' must be a boolean.")
+
     parsed_bindings.sort(key=lambda b: (0 if b.layer is Layer.BASE else 1, b.key))
     return AppConfig(
         schema_version=SCHEMA_VERSION,
         trigger=trigger,
         auto_fullscreen_on_switch=raw_auto_fs,
+        enable_mouse_selection=raw_mouse_sel,
         bindings=tuple(parsed_bindings),
     )
 
@@ -202,6 +211,8 @@ def serialize_config_dict(config: AppConfig) -> dict[str, Any]:
     }
     if config.auto_fullscreen_on_switch:
         out["auto_fullscreen_on_switch"] = True
+    if config.enable_mouse_selection:
+        out["enable_mouse_selection"] = True
     out["bindings"] = bindings_out
     return out
 
@@ -245,6 +256,11 @@ class BindingStore:
     def auto_fullscreen_on_switch(self) -> bool:
         with self._lock:
             return self._config.auto_fullscreen_on_switch
+
+    @property
+    def enable_mouse_selection(self) -> bool:
+        with self._lock:
+            return self._config.enable_mouse_selection
 
     @property
     def load_error(self) -> str | None:
@@ -396,6 +412,15 @@ class BindingStore:
         with self._lock:
             self._ensure_not_corrupted_locked()
             new_cfg = replace(self._config, auto_fullscreen_on_switch=bool(enabled))
+            self._write_atomic_locked(new_cfg)
+            self._config = new_cfg
+            return new_cfg
+
+    def set_enable_mouse_selection(self, enabled: bool) -> AppConfig:
+        """Update and persist whether optional mouse hover & click selection is active in HUD."""
+        with self._lock:
+            self._ensure_not_corrupted_locked()
+            new_cfg = replace(self._config, enable_mouse_selection=bool(enabled))
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg

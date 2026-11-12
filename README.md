@@ -76,6 +76,7 @@ open dist/AppJuggler.app
 - Open **`Edit Assignments…`** anytime from the keyboard by pressing **`Caps Lock ×2 → ,`** *(comma)*, or by clicking the compact keyboard icon in the macOS menu bar.
 - Switch between **Base Layer (`A–Z`)** and **Shift Layer (`⇧A–Z`)**, click any keycap on the visual keyboard map, select an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
 - **Switch Target Window to Full Screen** *(optional checkbox)*: when checked (or `"auto_fullscreen_on_switch": true` in `config.json`), any non-modal target window AppJuggler switches to automatically enters macOS Full Screen (if not already in Full Screen).
+- **Mouse Hover & Click in HUD** *(optional checkbox, disabled by default)*: when checked (or `"enable_mouse_selection": true` in `config.json`), you can also hover to highlight and click to select apps or windows directly in the HUD overlay (plus scroll wheel in multi-window lists and clicking the layer pill to toggle `Base` ↔ `Shift`). When unchecked, the HUD remains keyboard-only and completely click-through (`ignoresMouseEvents`).
 - Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux), and external edits to `config.json` are hot-reloaded automatically.
 
 ### 2. Optional: Hold `Caps Lock` (2s) Quick Assign *(Disabled by Default)*

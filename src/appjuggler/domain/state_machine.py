@@ -23,6 +23,11 @@ from appjuggler.domain.events import (
     KeyKind,
     LaunchAppCommand,
     LaunchCompleted,
+    MouseClickAppSlot,
+    MouseClickWindowSlot,
+    MouseHoverWindowSlot,
+    MouseScrollWindowSelection,
+    MouseToggleLayer,
     NavCommand,
     OpenAppsForAssignResolved,
     OpenFullAssignmentWindowCommand,
@@ -63,12 +68,14 @@ class NavigationController:
         max_pending_inputs: int = 8,
         single_window_digit_guard_ms: int = 150,
         enable_caps_hold_assign: bool = False,
+        enable_mouse_selection: bool = False,
     ) -> None:
         self._lock = threading.Lock()
         self._trigger_interval_ns: int = trigger_interval_ms * 1_000_000
         self._max_pending_inputs: int = max_pending_inputs
         self._single_window_digit_guard_ns: int = single_window_digit_guard_ms * 1_000_000
         self._enable_caps_hold_assign: bool = bool(enable_caps_hold_assign)
+        self._enable_mouse_selection: bool = bool(enable_mouse_selection)
 
         # Snapshots updated from BindingStore / ApplicationRegistry
         self._bindings: dict[tuple[str, Layer], AppBinding] = {}
@@ -144,6 +151,15 @@ class NavigationController:
     def set_caps_hold_assign_enabled(self, enabled: bool) -> None:
         with self._lock:
             self._enable_caps_hold_assign = bool(enabled)
+
+    @property
+    def mouse_selection_enabled(self) -> bool:
+        with self._lock:
+            return self._enable_mouse_selection
+
+    def set_mouse_selection_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._enable_mouse_selection = bool(enabled)
 
     def update_bindings(self, bindings: list[AppBinding] | tuple[AppBinding, ...]) -> None:
         mapping = {b.slot_key: b for b in bindings}
@@ -343,6 +359,19 @@ class NavigationController:
 
         letter = event.symbol.upper()
         chosen_layer = Layer.SHIFT if event.shift_held else Layer.BASE
+        cmds = self._select_app_slot_locked(
+            letter=letter,
+            chosen_layer=chosen_layer,
+            keydown_ns=event.timestamp_ns,
+        )
+        return StepResult(InputAction.SWALLOW, cmds)
+
+    def _select_app_slot_locked(
+        self,
+        letter: str,
+        chosen_layer: Layer,
+        keydown_ns: int,
+    ) -> tuple[NavCommand, ...]:
         self._active_layer = chosen_layer
         binding = self._bindings.get((letter, chosen_layer))
 
@@ -353,21 +382,18 @@ class NavigationController:
                 if self._enable_caps_hold_assign
                 else "Press ',' to Edit Assignments"
             )
-            return StepResult(
-                InputAction.SWALLOW,
-                (
-                    ShowStatusBannerCommand(
-                        level="info",
-                        message=f"No app assigned to {prefix}{letter}  ·  {hint}",
-                        auto_hide_ms=2200,
-                        keep_app_map=True,
-                    ),
+            return (
+                ShowStatusBannerCommand(
+                    level="info",
+                    message=f"No app assigned to {prefix}{letter}  ·  {hint}",
+                    auto_hide_ms=2200,
+                    keep_app_map=True,
                 ),
             )
 
         self._op_token += 1
         self._selected_binding = binding
-        self._letter_keydown_ns = event.timestamp_ns
+        self._letter_keydown_ns = keydown_ns
         self._pending_inputs.clear()
         self._window_slots = ()
         self._selected_slot = None
@@ -375,17 +401,11 @@ class NavigationController:
         if binding.bundle_id in self._running_bundle_ids:
             self._state = NavState.WINDOW_SELECTION
             self._resolving_windows = True
-            return StepResult(
-                InputAction.SWALLOW,
-                (InspectAppWindowsCommand(op_token=self._op_token, binding=binding),),
-            )
+            return (InspectAppWindowsCommand(op_token=self._op_token, binding=binding),)
 
         self._state = NavState.LAUNCH_PENDING
         self._resolving_windows = False
-        return StepResult(
-            InputAction.SWALLOW,
-            (LaunchAppCommand(op_token=self._op_token, binding=binding),),
-        )
+        return (LaunchAppCommand(op_token=self._op_token, binding=binding),)
 
     def _handle_quick_assign_app_keydown_locked(self, event: HardwareKeyEvent) -> StepResult:
         if event.other_modifiers_held:
@@ -507,6 +527,17 @@ class NavigationController:
 
         letter = event.symbol.upper()
         chosen_layer = Layer.SHIFT if event.shift_held else Layer.BASE
+        return StepResult(
+            InputAction.SWALLOW,
+            self._assign_key_slot_locked(letter=letter, chosen_layer=chosen_layer),
+        )
+
+    def _assign_key_slot_locked(
+        self, letter: str, chosen_layer: Layer
+    ) -> tuple[NavCommand, ...]:
+        if self._assign_target_app is None:
+            return ()
+        target_app = self._assign_target_app
         self._active_layer = chosen_layer
         existing = self._bindings.get((letter, chosen_layer))
 
@@ -518,30 +549,24 @@ class NavigationController:
             tok = self._op_token
             self._state = NavState.IDLE
             self._reset_selection_context_locked()
-            return StepResult(
-                InputAction.SWALLOW,
-                (
-                    CommitQuickAssignCommand(
-                        op_token=tok,
-                        app=target_app,
-                        key=letter,
-                        layer=chosen_layer,
-                        allow_replace=True,
-                    ),
+            return (
+                CommitQuickAssignCommand(
+                    op_token=tok,
+                    app=target_app,
+                    key=letter,
+                    layer=chosen_layer,
+                    allow_replace=True,
                 ),
             )
 
         # Slot is occupied by a DIFFERENT app -> ask inline confirmation before replacing (§2.2)
         self._assign_conflict_slot = (letter, chosen_layer)
-        return StepResult(
-            InputAction.SWALLOW,
-            (
-                ShowQuickAssignKeyMapCommand(
-                    op_token=self._op_token,
-                    app=target_app,
-                    active_layer=chosen_layer,
-                    conflict_existing=existing,
-                ),
+        return (
+            ShowQuickAssignKeyMapCommand(
+                op_token=self._op_token,
+                app=target_app,
+                active_layer=chosen_layer,
+                conflict_existing=existing,
             ),
         )
 
@@ -719,6 +744,130 @@ class NavigationController:
                     auto_hide_ms=3200,
                 ),
             )
+
+        if isinstance(
+            event,
+            (
+                MouseClickAppSlot,
+                MouseToggleLayer,
+                MouseHoverWindowSlot,
+                MouseClickWindowSlot,
+                MouseScrollWindowSelection,
+            ),
+        ):
+            return self._handle_mouse_event_locked(event)
+
+        return ()
+
+    def _handle_mouse_event_locked(self, event: BackendEvent) -> tuple[NavCommand, ...]:
+        if not self._enable_mouse_selection:
+            return ()
+
+        if isinstance(event, MouseToggleLayer):
+            if self._state not in (NavState.APP_SELECTION, NavState.QUICK_ASSIGN_KEY):
+                return ()
+            self._active_layer = (
+                Layer.BASE if self._active_layer is Layer.SHIFT else Layer.SHIFT
+            )
+            if (
+                self._state is NavState.QUICK_ASSIGN_KEY
+                and self._assign_target_app is not None
+            ):
+                self._assign_conflict_slot = None
+                return (
+                    ShowQuickAssignKeyMapCommand(
+                        op_token=self._op_token,
+                        app=self._assign_target_app,
+                        active_layer=self._active_layer,
+                        conflict_existing=None,
+                    ),
+                )
+            return (
+                UpdateAppMapLayerCommand(
+                    op_token=self._op_token, active_layer=self._active_layer
+                ),
+            )
+
+        if isinstance(event, MouseClickAppSlot):
+            letter = event.key.strip().upper()
+            if len(letter) != 1 or not ("A" <= letter <= "Z"):
+                return ()
+            if self._state is NavState.APP_SELECTION:
+                # keydown_ns=0 ensures mouse clicks never arm the 150ms single-window digit guard
+                return self._select_app_slot_locked(
+                    letter=letter,
+                    chosen_layer=event.layer,
+                    keydown_ns=0,
+                )
+            if self._state is NavState.QUICK_ASSIGN_KEY:
+                return self._assign_key_slot_locked(
+                    letter=letter,
+                    chosen_layer=event.layer,
+                )
+            return ()
+
+        if isinstance(event, MouseHoverWindowSlot):
+            if (
+                self._state is not NavState.WINDOW_SELECTION
+                or self._resolving_windows
+                or self._selected_binding is None
+            ):
+                return ()
+            target = self._find_slot_locked(event.slot_number)
+            if target is None or self._selected_slot == event.slot_number:
+                return ()
+            self._selected_slot = event.slot_number
+            return (
+                UpdateWindowSelectionCommand(
+                    op_token=self._op_token,
+                    selected_slot=self._selected_slot,
+                    generation=self._window_generation,
+                ),
+            )
+
+        if isinstance(event, MouseClickWindowSlot):
+            if (
+                self._state is not NavState.WINDOW_SELECTION
+                or self._resolving_windows
+                or self._selected_binding is None
+            ):
+                return ()
+            target = self._find_slot_locked(event.slot_number)
+            if target is None:
+                return (
+                    UpdateWindowSelectionCommand(
+                        op_token=self._op_token,
+                        selected_slot=self._selected_slot,
+                        generation=self._window_generation,
+                        notice=f"No window #{event.slot_number}",
+                    ),
+                )
+            self._selected_slot = event.slot_number
+            self._state = NavState.ACTIVATION_PENDING
+            return (
+                ActivateWindowCommand(
+                    op_token=self._op_token,
+                    binding=self._selected_binding,
+                    slot=target,
+                    generation=self._window_generation,
+                ),
+            )
+
+        if isinstance(event, MouseScrollWindowSelection):
+            if (
+                self._state is not NavState.WINDOW_SELECTION
+                or self._resolving_windows
+                or self._selected_binding is None
+                or not self._window_slots
+                or event.delta == 0
+            ):
+                return ()
+            kind = KeyKind.ARROW_DOWN if event.delta > 0 else KeyKind.ARROW_UP
+            cmds = self._apply_window_selection_input_locked(
+                QueuedSelectionInput(kind=kind),
+                emit_show_instead_of_update=False,
+            )
+            return tuple(cmds)
 
         return ()
 
