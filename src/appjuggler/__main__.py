@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import sys
 
-from appjuggler import __version__
+from appjuggler import build_info
 from appjuggler.persistence.binding_store import BindingStore, default_config_path
 
 
@@ -27,7 +27,8 @@ def _run_doctor(config_path: Path) -> int:
     """Print non-invasive environment, permission, and configuration diagnostics."""
     store = BindingStore(path=config_path)
     report: dict[str, object] = {
-        "version": __version__,
+        "version": build_info.current().version,
+        "build": build_info.current().build,
         "platform": sys.platform,
         "python": sys.version.split()[0],
         "config_path": str(store.path),
@@ -82,7 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="appjuggler",
         description="AppJuggler: Jump straight to any app or window from your keyboard.",
     )
-    parser.add_argument("--version", action="version", version=f"AppJuggler {__version__}")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print the version, build and license, then exit.",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -101,11 +106,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(cleaned_argv)
+    if args.version:
+        # Printed directly: argparse's version action would wrap the line.
+        print(build_info.console_banner(build_info.current()))
+        return 0
     _configure_logging(args.verbose)
     cfg_path = args.config or default_config_path()
 
     if args.doctor:
         return _run_doctor(cfg_path)
+
+    # Introduce ourselves on the console before anything else.
+    logging.getLogger("appjuggler").info(build_info.console_banner(build_info.current()))
 
     if sys.platform == "darwin":
         from appjuggler.platforms.macos.runtime import MacOSAppRuntime

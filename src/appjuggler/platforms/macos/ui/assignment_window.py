@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import importlib.resources
 import math
+import time
 from pathlib import Path
 from typing import Callable
 
 import Cocoa
 import objc
 
-from appjuggler import CONTACT_EMAIL
+from appjuggler import CONTACT_EMAIL, build_info
 from appjuggler.contracts import ApplicationRegistry
 from appjuggler.domain.models import AppBinding, AppRecord, Layer
 from appjuggler.persistence.binding_store import (
@@ -23,7 +24,55 @@ from appjuggler.platforms.macos.ui import theme
 from appjuggler.platforms.macos.ui.overlay_panel import KeyboardMapGridView
 
 
-class _RoundedCardView(Cocoa.NSView):
+class _ClickableView(Cocoa.NSView):
+    """View that runs a callback when clicked, with a pointing-hand cursor and a button role
+    for VoiceOver. Without a callback it behaves as a plain view."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_ClickableView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._on_click: Callable[[], None] | None = None
+        return self
+
+    @objc.python_method
+    def set_on_click(self, callback: Callable[[], None] | None) -> None:
+        self._on_click = callback
+        win = self.window()
+        if win is not None:
+            win.invalidateCursorRectsForView_(self)
+
+    def acceptsFirstMouse_(self, _event) -> bool:
+        return self._on_click is not None
+
+    def mouseDown_(self, event) -> None:
+        if self._on_click is None:
+            objc.super(_ClickableView, self).mouseDown_(event)
+            return
+        self._on_click()
+
+    def resetCursorRects(self) -> None:
+        if self._on_click is not None:
+            self.addCursorRect_cursor_(self.bounds(), Cocoa.NSCursor.pointingHandCursor())
+
+    def isAccessibilityElement(self) -> bool:
+        return self._on_click is not None or bool(
+            objc.super(_ClickableView, self).isAccessibilityElement()
+        )
+
+    def accessibilityRole(self):
+        if self._on_click is not None:
+            return Cocoa.NSAccessibilityButtonRole
+        return objc.super(_ClickableView, self).accessibilityRole()
+
+    def accessibilityPerformPress(self) -> bool:
+        if self._on_click is None:
+            return False
+        self._on_click()
+        return True
+
+
+class _RoundedCardView(_ClickableView):
     """Pure-AppKit rounded card container (avoids CGColor pointer bridging warnings)."""
 
     def initWithFrame_(self, frame):
@@ -90,7 +139,7 @@ class _RoundedCardView(Cocoa.NSView):
             Cocoa.NSGraphicsContext.restoreGraphicsState()
 
 
-class _HighQualityImageView(Cocoa.NSView):
+class _HighQualityImageView(_ClickableView):
     """Draws an NSImage crisply with high interpolation and aspect-fit centering."""
 
     def initWithFrame_(self, frame):
@@ -394,6 +443,177 @@ class _CopyableAddressButton(Cocoa.NSButton):
         )
 
 
+class _LinkButton(Cocoa.NSButton):
+    """A grey prefix followed by a URL; a click opens the URL in the default browser."""
+
+    FONT_SIZE = 12.0
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_LinkButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._prefix: str = ""
+        self._url: str = ""
+        self._opener: Callable[[str], None] | None = None
+        self._hovered: bool = False
+        self._tracking_area = None
+        self.setBordered_(False)
+        self.setButtonType_(Cocoa.NSButtonTypeMomentaryChange)
+        self.setFocusRingType_(Cocoa.NSFocusRingTypeNone)
+        self.setToolTip_("Open in your browser")
+        self.setTarget_(self)
+        self.setAction_("openURL:")
+        return self
+
+    @objc.python_method
+    def configure(
+        self, prefix: str, url: str, opener: Callable[[str], None] | None = None
+    ) -> None:
+        """`opener` defaults to the default browser (tests pass a recorder)."""
+        self._prefix = prefix
+        self._url = url
+        self._opener = opener
+        self._refresh_title()
+        self.sizeToFit()
+
+    def resetCursorRects(self) -> None:
+        self.addCursorRect_cursor_(self.bounds(), Cocoa.NSCursor.pointingHandCursor())
+
+    def updateTrackingAreas(self) -> None:
+        objc.super(_LinkButton, self).updateTrackingAreas()
+        if self._tracking_area is not None:
+            self.removeTrackingArea_(self._tracking_area)
+        opts = (
+            Cocoa.NSTrackingMouseEnteredAndExited
+            | Cocoa.NSTrackingActiveAlways
+            | Cocoa.NSTrackingInVisibleRect
+        )
+        area = Cocoa.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            Cocoa.NSZeroRect, opts, self, None
+        )
+        self.addTrackingArea_(area)
+        self._tracking_area = area
+
+    def mouseEntered_(self, _event) -> None:
+        self._hovered = True
+        self._refresh_title()
+
+    def mouseExited_(self, _event) -> None:
+        self._hovered = False
+        self._refresh_title()
+
+    def openURL_(self, _sender) -> None:
+        if not self._url:
+            return
+        if self._opener is not None:
+            self._opener(self._url)
+            return
+        Cocoa.NSWorkspace.sharedWorkspace().openURL_(Cocoa.NSURL.URLWithString_(self._url))
+
+    @objc.python_method
+    def _refresh_title(self) -> None:
+        font = theme.font_ui(self.FONT_SIZE)
+        title = Cocoa.NSMutableAttributedString.alloc().initWithString_attributes_(
+            self._prefix,
+            {
+                Cocoa.NSFontAttributeName: font,
+                Cocoa.NSForegroundColorAttributeName: Cocoa.NSColor.secondaryLabelColor(),
+            },
+        )
+        url_attrs = {
+            Cocoa.NSFontAttributeName: font,
+            Cocoa.NSForegroundColorAttributeName: Cocoa.NSColor.linkColor(),
+        }
+        if self._hovered:
+            url_attrs[Cocoa.NSUnderlineStyleAttributeName] = Cocoa.NSUnderlineStyleSingle
+        title.appendAttributedString_(
+            Cocoa.NSAttributedString.alloc().initWithString_attributes_(self._url, url_attrs)
+        )
+        self.setAttributedTitle_(title)
+
+
+def _about_popover_content(
+    info: build_info.BuildInfo, opener: Callable[[str], None] | None = None
+) -> Cocoa.NSView:
+    """Version pop-up contents: version and build, license, then source and native links."""
+    title = Cocoa.NSTextField.labelWithString_(build_info.version_line(info))
+    title.setFont_(theme.font_ui(12.5, bold=True))
+    title.setTextColor_(Cocoa.NSColor.labelColor())
+    title.setSelectable_(True)  # lets users copy the build for a bug report
+    title.sizeToFit()
+
+    license_lbl = Cocoa.NSTextField.labelWithString_(build_info.COPYRIGHT)
+    license_lbl.setFont_(theme.font_ui(11.5))
+    license_lbl.setTextColor_(Cocoa.NSColor.secondaryLabelColor())
+    license_lbl.sizeToFit()
+
+    source_link = _LinkButton.alloc().initWithFrame_(Cocoa.NSZeroRect)
+    source_link.configure("Source code: ", build_info.SOURCE_URL, opener)
+    native_link = _LinkButton.alloc().initWithFrame_(Cocoa.NSZeroRect)
+    native_link.configure("Native version: ", build_info.NATIVE_VERSION_URL, opener)
+
+    # Fixed frames, top to bottom. Labels and borderless buttons pad their text by about
+    # 2pt per side, hence the 2pt and 4pt corrections.
+    rows = [title, license_lbl, source_link, native_link]
+    gaps_after = [3.0, 10.0, 3.0]
+    pad_x, pad_y = 16.0, 14.0
+    width = max(float(v.frame().size.width) for v in rows) - 4.0 + 2 * pad_x
+    height = 2 * pad_y + sum(float(v.frame().size.height) for v in rows) + sum(gaps_after)
+    container = Cocoa.NSView.alloc().initWithFrame_(Cocoa.NSMakeRect(0.0, 0.0, width, height))
+    y = height - pad_y
+    for index, view in enumerate(rows):
+        y -= float(view.frame().size.height)
+        view.setFrameOrigin_(Cocoa.NSMakePoint(pad_x - 2.0, y))
+        container.addSubview_(view)
+        if index < len(gaps_after):
+            y -= gaps_after[index]
+    return container
+
+
+class _AboutPopover(Cocoa.NSObject):
+    """Version pop-up shown under a logo in Edit Assignments when the logo is clicked."""
+
+    def init(self):
+        self = objc.super(_AboutPopover, self).init()
+        if self is None:
+            return None
+        self._popover = None
+        self._last_closed = float("-inf")
+        return self
+
+    @objc.python_method
+    def toggle_below(self, view) -> None:
+        """Show the pop-up under `view`, or close it when it is already open."""
+        if self._popover is not None and self._popover.isShown():
+            self._popover.performClose_(None)
+            return
+        # A click on the logo first closes the open pop-up (it is transient); that click
+        # should leave it closed rather than open it again.
+        if time.monotonic() - self._last_closed < 0.3:
+            return
+
+        content = _about_popover_content(build_info.current())
+        controller = Cocoa.NSViewController.alloc().init()
+        controller.setView_(content)
+        controller.setPreferredContentSize_(content.frame().size)
+        popover = Cocoa.NSPopover.alloc().init()
+        popover.setBehavior_(Cocoa.NSPopoverBehaviorTransient)
+        popover.setDelegate_(self)
+        popover.setContentViewController_(controller)
+        popover.showRelativeToRect_ofView_preferredEdge_(
+            view.bounds(), view, Cocoa.NSRectEdgeMinY
+        )
+        self._popover = popover
+
+    @objc.python_method
+    def close(self) -> None:
+        if self._popover is not None:
+            self._popover.performClose_(None)
+
+    def popoverDidClose_(self, _notification) -> None:
+        self._last_closed = time.monotonic()
+
+
 class _AssignmentWindowDelegate(Cocoa.NSObject):
     def initWithCallbacks_(
         self,
@@ -530,6 +750,7 @@ class AssignmentEditorController:
         self._repair_btn = None
         self._status_w: float = 0.0
         self._status_w_beside_repair: float = 0.0
+        self._about_popover = _AboutPopover.alloc().init()
 
     def _mark_editing_active(self) -> None:
         if not self._editing_active:
@@ -659,6 +880,7 @@ class AssignmentEditorController:
             Cocoa.NSMakeRect(11.0, hdr_sep_y + 10.5, 88.0, 88.0)
         )
         app_logo_view.set_image(app_logo_img)
+        self._show_version_on_click(app_logo_view)
         content.addSubview_(app_logo_view)
 
         title_lbl = Cocoa.NSTextField.labelWithString_("AppJuggler")
@@ -706,6 +928,7 @@ class AssignmentEditorController:
             fallback_lbl.setAlignment_(Cocoa.NSTextAlignmentCenter)
             fallback_lbl.setFrame_(Cocoa.NSMakeRect(4.0, 12.0, col_w - 8.0, 18.0))
             logo_card.addSubview_(fallback_lbl)
+        self._show_version_on_click(logo_card)
         content.addSubview_(logo_card)
 
         address_btn = _CopyableAddressButton.alloc().initWithFrame_(
@@ -1493,7 +1716,13 @@ class AssignmentEditorController:
             is_error=False,
         )
 
+    def _show_version_on_click(self, view: _ClickableView) -> None:
+        """Clicking a logo shows the version pop-up under it."""
+        view.setAccessibilityLabel_("Version information")
+        view.set_on_click(lambda: self._about_popover.toggle_below(view))
+
     def _handle_close(self) -> None:
+        self._about_popover.close()
         self._clear_transient_feedback()
         self._defocus_interval_field()
         self._mark_editing_inactive()

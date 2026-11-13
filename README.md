@@ -75,6 +75,7 @@ open dist/AppJuggler.app
 ```
 
 - Produces an ad-hoc signed menu-bar bundle (`LSUIElement=true`, `CFBundleIdentifier=io.appjuggler.AppJuggler`) at `dist/AppJuggler.app`.
+- The bundle is stamped with its version and build. AppJuggler uses calendar versions: `2611` means it was built from a commit dated November 2026, and the build is that commit's short hash (`-dirty` when tracked files had uncommitted changes). Run from a source checkout, AppJuggler reads both from git. `appjuggler --version` prints them, and the app logs them first thing at startup: `AppJuggler 1 | Version: 2611 | Build: ae57acf | (c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License`.
 - Grant **AppJuggler.app** access in **System Settings → Privacy & Security → Accessibility**. (If you rebuild `AppJuggler.app` later, macOS TCC may require toggling its Accessibility switch OFF and back ON.)
 
 ---
@@ -94,6 +95,7 @@ open dist/AppJuggler.app
 - **Disable Window Animations…** *(button in `Edit Assignments…` & menu bar)*: opens a dedicated diagnostic & one-click helper window that disables programmable macOS AppKit window, Dock, Mission Control, and Finder animations (`defaults`), moves stuck Full Screen windows onto a single Desktop Space, and links directly to `System Settings → Accessibility → Display → Reduce motion`.
 - **Mouse Hover & Click in HUD** *(optional checkbox, disabled by default)*: when checked (or `"enable_mouse_selection": true` in `config.json`), you can also hover to highlight and click to select apps or windows directly in the HUD overlay (plus scroll wheel in multi-window lists and clicking the layer pill to toggle `Base` ↔ `Shift`). When unchecked, the HUD remains keyboard-only and completely click-through (`ignoresMouseEvents`).
 - Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux), and external edits to `config.json` are hot-reloaded automatically.
+- Click either logo in the window header to see the version, build and license, with links to the source code and to the native AppJuggler 2.
 
 ### 2. Optional: Hold `Caps Lock` (2s) Quick Assign *(Disabled by Default)*
 By default, AppJuggler only runs its lightweight `CGEventTap` double-Caps listener and does **not** attach an `IOHIDManager` hold monitor. If you want a 2-second physical `Caps Lock` hold to open an in-HUD open-apps quick-assign picker, opt in via either:
