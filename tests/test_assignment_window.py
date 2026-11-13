@@ -218,9 +218,18 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
         for v in subviews
         if isinstance(v, Cocoa.NSTextField) and not v.isEditable()
     }
-    assert "AppJuggler" in labels
+    assert "AppJuggler 1.9" in labels
     assert "Jump straight to any app or window from your keyboard." in labels
-    assert float(labels["AppJuggler"].frame().origin.y) > header_floor
+    assert float(labels["AppJuggler 1.9"].frame().origin.y) > header_floor
+    # The product number follows the name in the quieter secondary label color.
+    title = labels["AppJuggler 1.9"].attributedStringValue()
+    name_attrs, _ = title.attributesAtIndex_effectiveRange_(0, None)
+    number_attrs, _ = title.attributesAtIndex_effectiveRange_(title.length() - 1, None)
+    assert name_attrs[Cocoa.NSForegroundColorAttributeName] == Cocoa.NSColor.labelColor()
+    assert (
+        number_attrs[Cocoa.NSForegroundColorAttributeName]
+        == Cocoa.NSColor.secondaryLabelColor()
+    )
 
     app_icons = [v for v in subviews if isinstance(v, _HighQualityImageView)]
     assert len(app_icons) == 1
@@ -457,7 +466,7 @@ def test_version_popup_shows_version_build_license_and_links() -> None:
         if isinstance(v, Cocoa.NSTextField) and not isinstance(v, Cocoa.NSButton)
     ]
     assert labels == [
-        "AppJuggler 1 | Version: 2611 | Build: ae57acf",
+        "AppJuggler 1.9 | Version: 2611 | Build: ae57acf",
         "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License",
     ]
 

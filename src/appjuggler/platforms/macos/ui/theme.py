@@ -73,6 +73,28 @@ def fill_round_rect(
         path.stroke()
 
 
+def product_title(
+    font: Cocoa.NSFont, name_color: Cocoa.NSColor, number_color: Cocoa.NSColor
+) -> Cocoa.NSAttributedString:
+    """"AppJuggler 1.9": the name, then the product number in a quieter color."""
+    from appjuggler.build_info import PRODUCT_NUMBER
+
+    title = Cocoa.NSMutableAttributedString.alloc().initWithString_attributes_(
+        "AppJuggler",
+        {Cocoa.NSFontAttributeName: font, Cocoa.NSForegroundColorAttributeName: name_color},
+    )
+    title.appendAttributedString_(
+        Cocoa.NSAttributedString.alloc().initWithString_attributes_(
+            f" {PRODUCT_NUMBER}",
+            {
+                Cocoa.NSFontAttributeName: font,
+                Cocoa.NSForegroundColorAttributeName: number_color,
+            },
+        )
+    )
+    return title
+
+
 def draw_text(
     text: str,
     rect: Cocoa.NSRect,

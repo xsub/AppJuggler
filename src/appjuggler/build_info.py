@@ -1,4 +1,4 @@
-"""Version and build of the running AppJuggler 1.
+"""Version and build of the running AppJuggler 1.9.
 
 Versions follow the calendar: "2611" means the code comes from a commit dated November 2026.
 The build is that commit's short hash, with "-dirty" when tracked files have uncommitted
@@ -15,7 +15,9 @@ from pathlib import Path
 
 from appjuggler import APP_BUNDLE_ID
 
-PRODUCT_NAME = "AppJuggler 1"
+# Fixed number after the name; window and HUD titles show it slightly greyed.
+PRODUCT_NUMBER = "1.9"
+PRODUCT_NAME = f"AppJuggler {PRODUCT_NUMBER}"
 COPYRIGHT = "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License"
 SOURCE_URL = "https://github.com/xsub/AppJuggler"
 NATIVE_VERSION_URL = "https://PuffyClouds.Works/AppJuggler2"
