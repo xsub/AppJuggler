@@ -81,8 +81,13 @@ open dist/AppJuggler.app
 ## Assigning Apps to Keys
 
 ### 1. Edit Assignments Window (`Caps ×2 → ,` or Menu Bar Icon)
+
+<p align="center">
+  <img src="docs/assets/edit_assignments.jpg" width="900" alt="AppJuggler Edit Assignments window" />
+</p>
+
 - Open **`Edit Assignments…`** anytime from the keyboard by pressing **`Caps Lock ×2 → ,`** *(comma)*, or by clicking the compact keyboard icon in the macOS menu bar.
-- Switch between **Base Layer (`A–Z`)** and **Shift Layer (`⇧A–Z`)**, click any keycap on the visual keyboard map, select an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
+- Switch between **Base Layer (`A–Z`)** and **Shift Layer (`⇧A–Z`)**, click (or press `A–Z` for) any keycap on the visual keyboard map, select an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
 - **Instant Maximize (`Same Space — 0 ms`)** *(optional checkbox)*: when checked (or `"auto_maximize_on_switch": true` in `config.json`), any non-modal desktop window AppJuggler switches to instantly fills the screen (`visibleFrame`) via Accessibility API in `< 1 ms` **on the current Desktop Space** — avoiding macOS's cross-Space slide/fade animations completely.
 - **Switch Target Window to Full Screen** *(optional checkbox)*: when checked (or `"auto_fullscreen_on_switch": true` in `config.json`), any non-modal target window AppJuggler switches to automatically enters native macOS Full Screen *(note: macOS creates a separate Space per Full Screen window)*.
 - **Disable Window Animations…** *(button in `Edit Assignments…` & menu bar)*: opens a dedicated diagnostic & one-click helper window that disables programmable macOS AppKit window, Dock, Mission Control, and Finder animations (`defaults`), moves stuck Full Screen windows onto a single Desktop Space, and links directly to `System Settings → Accessibility → Display → Reduce motion`.
