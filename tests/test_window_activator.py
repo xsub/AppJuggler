@@ -15,7 +15,9 @@ class _StubRegistry:
     def __init__(self, alive: bool = True) -> None:
         self.alive = alive
 
-    def discover_windows(self, bundle_id: str, timeout_sec: float = 0.8):
+    def discover_windows(
+        self, bundle_id: str, timeout_sec: float = 0.8, include_dismissed: bool = False
+    ):
         return ()
 
     def is_window_alive(self, window: DiscoveredWindow) -> bool:

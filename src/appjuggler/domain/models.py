@@ -73,6 +73,7 @@ class AppBinding:
     bundle_id: str
     display_name: str
     bundle_path: str | None = None
+    show_window_picker: bool = True
 
     def __post_init__(self) -> None:
         normalized_key = self.key.upper()
@@ -85,6 +86,8 @@ class AppBinding:
             raise ValueError("bundle_id must be a non-empty string.")
         if not self.display_name or not self.display_name.strip():
             raise ValueError("display_name must be a non-empty string.")
+        if not isinstance(self.show_window_picker, bool):
+            raise ValueError("show_window_picker must be a boolean.")
 
     @property
     def slot_key(self) -> tuple[str, Layer]:
@@ -129,6 +132,20 @@ class DiscoveredWindow:
     native_handle: Any = field(default=None, repr=False, compare=False)
 
 
+def slot_number_to_badge(slot_number: int) -> str:
+    """Format a 1-based window slot index as '1'..'9', 'A'..'Z' (10..35), or '36'+."""
+    if 1 <= slot_number <= 9:
+        return str(slot_number)
+    if 10 <= slot_number <= 35:
+        return chr(ord("A") + (slot_number - 10))
+    return str(slot_number)
+
+
+def slot_number_has_direct_key(slot_number: int) -> bool:
+    """Return True if slot_number maps to a single-key shortcut (1..9 or A..Z)."""
+    return 1 <= slot_number <= 35
+
+
 @dataclass(frozen=True)
 class WindowSlot:
     """Session-stable numbered slot assigned to a live window."""
@@ -143,6 +160,14 @@ class WindowSlot:
     @property
     def title(self) -> str:
         return self.window.title
+
+    @property
+    def badge_label(self) -> str:
+        return slot_number_to_badge(self.slot_number)
+
+    @property
+    def has_direct_key(self) -> bool:
+        return slot_number_has_direct_key(self.slot_number)
 
 
 @dataclass(frozen=True)

@@ -674,3 +674,225 @@ def test_backend_wait_watchdog_releases_modal_capture() -> None:
     assert ctrl.is_waiting_on_backend is False
     assert any(isinstance(c, HideOverlayCommand) for c in cmds)
     assert ctrl.handle_key_event(_letter_event("A", 300)).action is InputAction.PASS_THROUGH
+
+
+def test_over_nine_windows_letter_selection_a_through_z() -> None:
+    ctrl = NavigationController(trigger_interval_ms=300)
+    term = AppBinding("T", Layer.BASE, "com.apple.Terminal", "Terminal")
+    ctrl.update_bindings((term,))
+    ctrl.update_running_apps(frozenset({"com.apple.Terminal"}))
+
+    # 1. Open picker with 12 Terminal tabs (slots 1..9, A=10, B=11, C=12)
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    ctrl.handle_key_event(_caps_event(180, caps_on=False))
+    r_t = ctrl.handle_key_event(_letter_event("T", 210, keycode=17))
+    tok = r_t.commands[0].op_token
+
+    twelve_slots = tuple(_slot(i, f"w{i}", "Tab") for i in range(1, 13))
+    ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok,
+            bundle_id="com.apple.Terminal",
+            slots=twelve_slots,
+            default_slot=1,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.WINDOW_SELECTION
+
+    # Pressing out-of-range letter 'D' (slot 13) warns "No window D" without closing
+    r_d = ctrl.handle_key_event(_letter_event("D", 250, keycode=2))
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert isinstance(r_d.commands[0], UpdateWindowSelectionCommand)
+    assert r_d.commands[0].notice == "No window D"
+
+    # Pressing 'B' (slot 11) immediately activates window #11!
+    r_b = ctrl.handle_key_event(_letter_event("B", 280, keycode=11))
+    assert ctrl.state is NavState.ACTIVATION_PENDING
+    assert isinstance(r_b.commands[0], ActivateWindowCommand)
+    assert r_b.commands[0].slot.slot_number == 11
+    assert r_b.commands[0].slot.badge_label == "B"
+    ctrl.handle_backend_event(ActivationCompleted(op_token=tok, success=True))
+    assert ctrl.state is NavState.IDLE
+
+    # 2. Fast chord Caps×2 -> T -> A BEFORE AppWindowsResolved arrives queues slot 10!
+    ctrl.handle_key_event(_caps_event(500, caps_on=True))
+    ctrl.handle_key_event(_caps_event(580, caps_on=False))
+    r_t2 = ctrl.handle_key_event(_letter_event("T", 610, keycode=17))
+    tok2 = r_t2.commands[0].op_token
+    r_a = ctrl.handle_key_event(_letter_event("A", 630, keycode=0))
+    assert r_a.action is InputAction.SWALLOW
+    assert r_a.commands == ()
+
+    cmds2 = ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok2,
+            bundle_id="com.apple.Terminal",
+            slots=twelve_slots,
+            default_slot=1,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.ACTIVATION_PENDING
+    assert isinstance(cmds2[0], ActivateWindowCommand)
+    assert cmds2[0].slot.slot_number == 10
+    assert cmds2[0].slot.badge_label == "A"
+
+
+def test_tilde_direct_jump_modifier_and_per_app_show_window_picker() -> None:
+    ctrl = NavigationController(trigger_interval_ms=300)
+    term_picker = AppBinding(
+        "T", Layer.BASE, "com.apple.Terminal", "Terminal", show_window_picker=True
+    )
+    firefox_direct = AppBinding(
+        "F", Layer.BASE, "org.mozilla.firefox", "Firefox", show_window_picker=False
+    )
+    ctrl.update_bindings((term_picker, firefox_direct))
+    ctrl.update_running_apps(frozenset({"com.apple.Terminal", "org.mozilla.firefox"}))
+    four_slots = tuple(_slot(i, f"w{i}", "Tab") for i in range(1, 5))
+
+    # 1. Caps×2 -> ~ (with autorepeat while held) -> T skips window list and jumps directly to default_slot!
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    ctrl.handle_key_event(_caps_event(180, caps_on=False))
+    assert ctrl.direct_jump_override is False
+
+    r_tilde = ctrl.handle_key_event(
+        HardwareKeyEvent(kind=KeyKind.TILDE, keycode=50, timestamp_ns=210 * MS)
+    )
+    assert r_tilde.action is InputAction.SWALLOW
+    assert ctrl.direct_jump_override is True
+    assert isinstance(r_tilde.commands[0], UpdateAppMapLayerCommand)
+    assert r_tilde.commands[0].direct_jump is True
+
+    # Holding '~' generating autorepeat MUST NOT untoggle Direct Jump!
+    ctrl.handle_key_event(
+        HardwareKeyEvent(
+            kind=KeyKind.TILDE, keycode=50, timestamp_ns=240 * MS, is_autorepeat=True
+        )
+    )
+    assert ctrl.direct_jump_override is True
+
+    r_t = ctrl.handle_key_event(_letter_event("T", 260, keycode=17))
+    assert isinstance(r_t.commands[0], InspectAppWindowsCommand)
+    assert r_t.commands[0].direct_jump is True
+    tok = r_t.commands[0].op_token
+
+    cmds = ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok,
+            bundle_id="com.apple.Terminal",
+            slots=four_slots,
+            default_slot=3,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.ACTIVATION_PENDING
+    assert isinstance(cmds[0], ActivateWindowCommand)
+    assert cmds[0].slot.slot_number == 3
+    ctrl.handle_backend_event(ActivationCompleted(op_token=tok, success=True))
+    assert ctrl.state is NavState.IDLE
+
+    # 2. Per-app show_window_picker=False (Firefox) jumps directly WITHOUT needing '~'!
+    ctrl.handle_key_event(_caps_event(500, caps_on=True))
+    ctrl.handle_key_event(_caps_event(580, caps_on=False))
+    assert ctrl.direct_jump_override is False
+
+    r_f = ctrl.handle_key_event(_letter_event("F", 610, keycode=3))
+    assert isinstance(r_f.commands[0], InspectAppWindowsCommand)
+    assert r_f.commands[0].direct_jump is True
+    tok_f = r_f.commands[0].op_token
+
+    cmds_f = ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok_f,
+            bundle_id="org.mozilla.firefox",
+            slots=four_slots,
+            default_slot=2,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.ACTIVATION_PENDING
+    assert isinstance(cmds_f[0], ActivateWindowCommand)
+    assert cmds_f[0].slot.slot_number == 2
+
+
+def test_dismiss_window_slot_via_mouse_x_and_delete_key() -> None:
+    from appjuggler.domain.events import (
+        DismissWindowSlotCommand,
+        MouseDismissWindowSlot,
+        WindowSlotDismissed,
+    )
+
+    # Deliberately keep enable_mouse_selection=False to prove clicking '×' ALWAYS works!
+    ctrl = NavigationController(trigger_interval_ms=300, enable_mouse_selection=False)
+    term = AppBinding("T", Layer.BASE, "com.apple.Terminal", "Terminal")
+    ctrl.update_bindings((term,))
+    ctrl.update_running_apps(frozenset({"com.apple.Terminal"}))
+
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    ctrl.handle_key_event(_caps_event(180, caps_on=False))
+    r_t = ctrl.handle_key_event(_letter_event("T", 210, keycode=17))
+    tok = r_t.commands[0].op_token
+
+    s1, s2, s3 = _slot(1, "w1"), _slot(2, "w2"), _slot(3, "w3")
+    ctrl.handle_backend_event(
+        AppWindowsResolved(
+            op_token=tok,
+            bundle_id="com.apple.Terminal",
+            slots=(s1, s2, s3),
+            default_slot=2,
+            generation=1,
+            app_is_running=True,
+        )
+    )
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert ctrl.selected_slot == 2
+
+    # 1. Click '×' on slot 2 -> emits DismissWindowSlotCommand even with mouse selection disabled
+    d_cmds = ctrl.handle_backend_event(MouseDismissWindowSlot(slot_number=2))
+    assert len(d_cmds) == 1
+    assert isinstance(d_cmds[0], DismissWindowSlotCommand)
+    assert d_cmds[0].window_id == "w2"
+    assert d_cmds[0].slot_number == 2
+
+    # Backend confirms slot 2 hidden -> list stays open with (s1, s3) and selects s3!
+    upd = ctrl.handle_backend_event(
+        WindowSlotDismissed(
+            op_token=tok,
+            bundle_id="com.apple.Terminal",
+            dismissed_slot=2,
+            slots=(s1, s3),
+            default_slot=1,
+            generation=2,
+        )
+    )
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert ctrl.selected_slot == 3
+    assert isinstance(upd[0], ShowWindowListCommand)
+    assert [s.slot_number for s in upd[0].slots] == [1, 3]
+
+    # 2. Pressing Delete/Backspace dismisses highlighted slot 3
+    del_step = ctrl.handle_key_event(
+        HardwareKeyEvent(kind=KeyKind.DELETE, keycode=51, timestamp_ns=300 * MS)
+    )
+    assert del_step.action is InputAction.SWALLOW
+    assert isinstance(del_step.commands[0], DismissWindowSlotCommand)
+    assert del_step.commands[0].window_id == "w3"
+
+    # Dismissing all remaining entries closes HUD cleanly back to IDLE with info banner
+    empty_upd = ctrl.handle_backend_event(
+        WindowSlotDismissed(
+            op_token=tok,
+            bundle_id="com.apple.Terminal",
+            dismissed_slot=1,
+            slots=(),
+            default_slot=None,
+            generation=3,
+        )
+    )
+    assert ctrl.state is NavState.IDLE
+    assert isinstance(empty_upd[0], ShowStatusBannerCommand)

@@ -15,6 +15,7 @@ from typing import Callable
 import Cocoa
 import objc
 
+from appjuggler import APP_BUNDLE_ID
 from appjuggler.contracts import PermissionStatus
 from appjuggler.domain.events import (
     ActivateAppNoWindowsCommand,
@@ -24,6 +25,7 @@ from appjuggler.domain.events import (
     BackendEvent,
     CapsHoldTriggered,
     CommitQuickAssignCommand,
+    DismissWindowSlotCommand,
     EnterAssignmentEditing,
     ExitAssignmentEditing,
     HardwareKeyEvent,
@@ -34,8 +36,10 @@ from appjuggler.domain.events import (
     LaunchCompleted,
     MouseClickAppSlot,
     MouseClickWindowSlot,
+    MouseDismissWindowSlot,
     MouseHoverWindowSlot,
     MouseScrollWindowSelection,
+    MouseToggleDirectJump,
     MouseToggleLayer,
     NavCommand,
     OpenAppsForAssignResolved,
@@ -51,6 +55,7 @@ from appjuggler.domain.events import (
     UpdateQuickAssignAppSelectionCommand,
     UpdateWindowSelectionCommand,
     WindowListRefreshed,
+    WindowSlotDismissed,
 )
 from appjuggler.domain.models import AppBinding, AppRecord, Layer, NavState
 from appjuggler.domain.state_machine import NavigationController
@@ -132,6 +137,9 @@ class _PowerAndLockObserver(Cocoa.NSObject):
     def activeSpaceChanged_(self, _note) -> None:
         self._cb["on_space_change"]()
 
+    def appActivated_(self, note) -> None:
+        self._cb["on_app_activated"](note)
+
     def signalPipeWake_(self, _note) -> None:
         self._cb["on_signal_wake"]()
 
@@ -171,11 +179,17 @@ class MacOSAppRuntime:
                 MouseClickAppSlot(key=key, layer=layer)
             ),
             on_layer_pill_clicked=lambda: self._post_backend_event(MouseToggleLayer()),
+            on_direct_jump_pill_clicked=lambda: self._post_backend_event(
+                MouseToggleDirectJump()
+            ),
             on_window_slot_hovered=lambda slot_num: self._post_backend_event(
                 MouseHoverWindowSlot(slot_number=slot_num)
             ),
             on_window_slot_clicked=lambda slot_num: self._post_backend_event(
                 MouseClickWindowSlot(slot_number=slot_num)
+            ),
+            on_window_slot_dismissed=lambda slot_num: self._post_backend_event(
+                MouseDismissWindowSlot(slot_number=slot_num)
             ),
             on_window_scroll=lambda delta: self._post_backend_event(
                 MouseScrollWindowSelection(delta=delta)
@@ -491,7 +505,18 @@ class MacOSAppRuntime:
             if isinstance(cmd, InspectAppWindowsCommand):
                 self._arm_backend_watchdog(cmd.op_token, timeout_sec=2.5)
                 self._nav_executor.submit(
-                    self._task_inspect_windows, cmd.op_token, cmd.binding
+                    self._task_inspect_windows,
+                    cmd.op_token,
+                    cmd.binding,
+                    cmd.direct_jump,
+                )
+            elif isinstance(cmd, DismissWindowSlotCommand):
+                self._nav_executor.submit(
+                    self._task_dismiss_window_slot,
+                    cmd.op_token,
+                    cmd.binding,
+                    cmd.window_id,
+                    cmd.slot_number,
                 )
             elif isinstance(cmd, LaunchAppCommand):
                 self._arm_backend_watchdog(cmd.op_token, timeout_sec=10.0)
@@ -544,9 +569,12 @@ class MacOSAppRuntime:
                 running_bundle_ids=running,
                 duplicate_conflicts=self._duplicate_conflicts,
                 quick_assign_enabled=self._store.trigger.enable_caps_hold_assign,
+                direct_jump=cmd.direct_jump,
             )
         elif isinstance(cmd, UpdateAppMapLayerCommand):
-            self._overlay.update_app_map_layer(cmd.active_layer)
+            self._overlay.update_app_map_layer(
+                cmd.active_layer, direct_jump=cmd.direct_jump
+            )
         elif isinstance(cmd, ShowQuickAssignAppListCommand):
             self._active_window_list_bundle = None
             self._last_modal_show_mono = time.monotonic()
@@ -612,12 +640,17 @@ class MacOSAppRuntime:
             )
             return
 
+        existing_for_bundle = self._store.bindings_for_bundle(cmd.app.bundle_id)
+        preserve_picker = (
+            existing_for_bundle[0].show_window_picker if existing_for_bundle else True
+        )
         new_binding = AppBinding(
             key=cmd.key,
             layer=cmd.layer,
             bundle_id=cmd.app.bundle_id,
             display_name=cmd.app.display_name,
             bundle_path=cmd.app.bundle_path,
+            show_window_picker=preserve_picker,
         )
         try:
             self._store.assign(
@@ -677,7 +710,9 @@ class MacOSAppRuntime:
             )
         )
 
-    def _task_inspect_windows(self, op_token: int, binding) -> None:
+    def _task_inspect_windows(
+        self, op_token: int, binding, direct_jump: bool = False
+    ) -> None:
         if self._controller.op_token != op_token:
             return
         is_running = self._app_registry.is_bundle_running(binding.bundle_id)
@@ -695,8 +730,18 @@ class MacOSAppRuntime:
             return
 
         discovered = self._window_registry.discover_windows(
-            binding.bundle_id, timeout_sec=0.75
+            binding.bundle_id, timeout_sec=0.75, include_dismissed=direct_jump
         )
+        if not direct_jump and not discovered:
+            all_wins = self._window_registry.discover_windows(
+                binding.bundle_id, timeout_sec=0.35, include_dismissed=True
+            )
+            if all_wins:
+                active_win = next(
+                    (w for w in all_wins if w.is_focused), all_wins[0]
+                )
+                discovered = (active_win,)
+
         snap = self._slot_table.reconcile(binding.bundle_id, discovered)
         self._post_backend_event(
             AppWindowsResolved(
@@ -706,6 +751,28 @@ class MacOSAppRuntime:
                 default_slot=snap.default_slot,
                 generation=snap.generation,
                 app_is_running=True,
+            )
+        )
+
+    def _task_dismiss_window_slot(
+        self, op_token: int, binding, window_id: str, slot_number: int
+    ) -> None:
+        if self._controller.op_token != op_token:
+            return
+        self._window_registry.dismiss_window(binding.bundle_id, window_id)
+        self._slot_table.dismiss_window(binding.bundle_id, window_id)
+        discovered = self._window_registry.discover_windows(
+            binding.bundle_id, timeout_sec=0.45
+        )
+        snap = self._slot_table.reconcile(binding.bundle_id, discovered)
+        self._post_backend_event(
+            WindowSlotDismissed(
+                op_token=op_token,
+                bundle_id=binding.bundle_id,
+                dismissed_slot=slot_number,
+                slots=snap.slots,
+                default_slot=snap.default_slot,
+                generation=snap.generation,
             )
         )
 
@@ -816,6 +883,7 @@ class MacOSAppRuntime:
 
         if outcome.success:
             self._slot_table.record_activated(binding.bundle_id, slot.window_id)
+            self._window_registry.note_application_activated(binding.bundle_id)
         # Release modal keyboard capture immediately once target window has focus.
         self._post_backend_event(
             ActivationCompleted(
@@ -880,6 +948,8 @@ class MacOSAppRuntime:
             bundle_path_hint=binding.bundle_path,
             leaving_fullscreen_space=leaving_fs_space,
         )
+        if outcome.success:
+            self._window_registry.note_application_activated(binding.bundle_id)
         self._post_backend_event(
             ActivationCompleted(
                 op_token=op_token,
@@ -1227,6 +1297,22 @@ class MacOSAppRuntime:
             bid = self._active_window_list_bundle
             self._bg_executor.submit(self._task_poll_active_window_list, bid)
 
+    def _on_workspace_app_activated(self, note) -> None:
+        try:
+            info = note.userInfo() if note is not None else None
+            app = (
+                info.get(Cocoa.NSWorkspaceApplicationKey)
+                if info is not None
+                else None
+            )
+            bid = str(app.bundleIdentifier() or "") if app is not None else ""
+        except Exception:
+            return
+        if bid and bid != APP_BUNDLE_ID and not self._shutting_down:
+            self._bg_executor.submit(
+                self._window_registry.note_application_activated, bid
+            )
+
     def _register_power_and_lock_observers(self) -> None:
         obs = _PowerAndLockObserver.alloc().initWithCallbacks_(
             {
@@ -1234,6 +1320,7 @@ class MacOSAppRuntime:
                 "on_wake": self._on_wake_or_unlock,
                 "on_lock": self._on_sleep_or_lock,
                 "on_space_change": self._on_active_space_changed,
+                "on_app_activated": self._on_workspace_app_activated,
                 "on_signal_wake": self._on_signal_pipe_wake,
                 "on_pulse": self._on_health_pulse,
             }
@@ -1255,6 +1342,12 @@ class MacOSAppRuntime:
             obs,
             "activeSpaceChanged:",
             Cocoa.NSWorkspaceActiveSpaceDidChangeNotification,
+            None,
+        )
+        ws_nc.addObserver_selector_name_object_(
+            obs,
+            "appActivated:",
+            Cocoa.NSWorkspaceDidActivateApplicationNotification,
             None,
         )
 

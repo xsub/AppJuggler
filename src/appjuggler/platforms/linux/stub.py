@@ -132,7 +132,10 @@ class LinuxWindowRegistry(WindowRegistry):
     """TODO(linux): Discover windows via EWMH `_NET_CLIENT_LIST` (X11) or compositor IPC (Wayland)."""
 
     def discover_windows(
-        self, bundle_id: str, timeout_sec: float = 0.8
+        self,
+        bundle_id: str,
+        timeout_sec: float = 0.8,
+        include_dismissed: bool = False,
     ) -> tuple[DiscoveredWindow, ...]:
         raise NotImplementedError(
             "TODO(linux): Query X11 EWMH or Wayland wlr-foreign-toplevel / GNOME / KWin."
@@ -140,6 +143,12 @@ class LinuxWindowRegistry(WindowRegistry):
 
     def is_window_alive(self, window: DiscoveredWindow) -> bool:
         raise NotImplementedError("TODO(linux): Verify XID / Wayland toplevel handle liveness.")
+
+    def dismiss_window(self, bundle_id: str, window_id: str) -> None:
+        raise NotImplementedError("TODO(linux): Hide window from quick-choice list.")
+
+    def note_application_activated(self, bundle_id: str) -> None:
+        raise NotImplementedError("TODO(linux): Un-dismiss active window on app activation.")
 
 
 class LinuxWindowActivator(WindowActivator):
@@ -174,10 +183,13 @@ class LinuxOverlayPresenter(OverlayPresenter):
         running_bundle_ids: frozenset[str],
         duplicate_conflicts: frozenset[str],
         notice: str | None = None,
+        direct_jump: bool = False,
     ) -> None:
         raise NotImplementedError("TODO(linux): Show GTK4 layer-shell keyboard map overlay.")
 
-    def update_app_map_layer(self, active_layer: Layer) -> None:
+    def update_app_map_layer(
+        self, active_layer: Layer, direct_jump: bool = False
+    ) -> None:
         raise NotImplementedError("TODO(linux): Switch Base/Shift layer in GTK4 overlay.")
 
     def show_launch_pending(self, binding: AppBinding) -> None:

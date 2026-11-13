@@ -173,3 +173,23 @@ def test_reload_if_modified_detects_external_edits(tmp_path: Path) -> None:
     reloaded_max.set_auto_fullscreen_on_switch(True)
     assert reloaded_max.auto_fullscreen_on_switch is True
     assert reloaded_max.auto_maximize_on_switch is False
+
+    # Per-app show_window_picker defaults to True (omitted in JSON) and persists when False
+    t_slot = reloaded_max.get_slot("T", Layer.BASE)
+    assert t_slot is not None and t_slot.show_window_picker is True
+    assert "show_window_picker" not in cfg_path.read_text(encoding="utf-8")
+
+    reloaded_max.set_slot_window_picker("T", Layer.BASE, False)
+    t_direct = reloaded_max.get_slot("T", Layer.BASE)
+    assert t_direct is not None and t_direct.show_window_picker is False
+    assert '"show_window_picker": false' in cfg_path.read_text(encoding="utf-8")
+
+    reloaded_direct = BindingStore(path=cfg_path, seed_defaults_if_missing=False)
+    t_after = reloaded_direct.get_slot("T", Layer.BASE)
+    assert t_after is not None and t_after.show_window_picker is False
+    f_after = reloaded_direct.get_slot("F", Layer.BASE)
+    assert f_after is not None and f_after.show_window_picker is True
+
+    reloaded_direct.set_slot_window_picker("T", Layer.BASE, True)
+    assert reloaded_direct.get_slot("T", Layer.BASE).show_window_picker is True
+    assert "show_window_picker" not in cfg_path.read_text(encoding="utf-8")

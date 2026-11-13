@@ -132,12 +132,16 @@ def parse_config_dict(raw: Any) -> AppConfig:
             bundle_path = entry.get("bundle_path")
             if bundle_path is not None and not isinstance(bundle_path, str):
                 raise ValueError("bundle_path must be a string or null")
+            show_window_picker = entry.get("show_window_picker", True)
+            if not isinstance(show_window_picker, bool):
+                raise ValueError("show_window_picker must be a boolean")
             binding = AppBinding(
                 key=str(entry["key"]),
                 layer=layer,
                 bundle_id=str(entry["bundle_id"]),
                 display_name=str(entry["display_name"]),
                 bundle_path=bundle_path or None,
+                show_window_picker=show_window_picker,
             )
         except KeyError as exc:
             raise ConfigValidationError(
@@ -205,6 +209,8 @@ def serialize_config_dict(config: AppConfig) -> dict[str, Any]:
         }
         if b.bundle_path:
             item["bundle_path"] = b.bundle_path
+        if not b.show_window_picker:
+            item["show_window_picker"] = False
         bindings_out.append(item)
 
     trigger_out: dict[str, Any] = {
@@ -400,6 +406,30 @@ class BindingStore:
                 if not (b.key == norm and b.layer is layer)
             )
             new_cfg = replace(self._config, bindings=updated)
+            self._write_atomic_locked(new_cfg)
+            self._config = new_cfg
+            return new_cfg
+
+    def set_slot_window_picker(
+        self, key: str, layer: Layer, show_window_picker: bool
+    ) -> AppConfig:
+        """Update and persist per-slot window/tab picker vs Direct Jump behavior."""
+        norm = key.upper()
+        with self._lock:
+            self._ensure_not_corrupted_locked()
+            updated: list[AppBinding] = []
+            changed = False
+            for b in self._config.bindings:
+                if b.key == norm and b.layer is layer:
+                    updated.append(
+                        replace(b, show_window_picker=bool(show_window_picker))
+                    )
+                    changed = True
+                else:
+                    updated.append(b)
+            if not changed:
+                return self._config
+            new_cfg = replace(self._config, bindings=tuple(updated))
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg

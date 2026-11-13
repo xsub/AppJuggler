@@ -19,6 +19,8 @@ class KeyKind(str, Enum):
     ESCAPE = "escape"
     TAB = "tab"
     COMMA = "comma"
+    TILDE = "tilde"
+    DELETE = "delete"
     CAPS_LOCK = "caps_lock"
     SHIFT_MODIFIER = "shift_modifier"
     OTHER_MODIFIER = "other_modifier"
@@ -55,18 +57,21 @@ class HardwareKeyEvent:
 class ShowAppMapCommand:
     op_token: int
     active_layer: Layer
+    direct_jump: bool = False
 
 
 @dataclass(frozen=True)
 class UpdateAppMapLayerCommand:
     op_token: int
     active_layer: Layer
+    direct_jump: bool = False
 
 
 @dataclass(frozen=True)
 class InspectAppWindowsCommand:
     op_token: int
     binding: AppBinding
+    direct_jump: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,6 +172,14 @@ class OpenFullAssignmentWindowCommand:
     pass
 
 
+@dataclass(frozen=True)
+class DismissWindowSlotCommand:
+    op_token: int
+    binding: AppBinding
+    window_id: str
+    slot_number: int
+
+
 NavCommand = (
     ShowAppMapCommand
     | UpdateAppMapLayerCommand
@@ -184,6 +197,7 @@ NavCommand = (
     | ShowQuickAssignKeyMapCommand
     | CommitQuickAssignCommand
     | OpenFullAssignmentWindowCommand
+    | DismissWindowSlotCommand
 )
 
 
@@ -212,6 +226,16 @@ class AppWindowsResolved:
 class WindowListRefreshed:
     bundle_id: str
     slots: tuple[WindowSlot, ...]
+    generation: int
+
+
+@dataclass(frozen=True)
+class WindowSlotDismissed:
+    op_token: int
+    bundle_id: str
+    dismissed_slot: int
+    slots: tuple[WindowSlot, ...]
+    default_slot: int | None
     generation: int
 
 
@@ -278,12 +302,22 @@ class MouseToggleLayer:
 
 
 @dataclass(frozen=True)
+class MouseToggleDirectJump:
+    pass
+
+
+@dataclass(frozen=True)
 class MouseHoverWindowSlot:
     slot_number: int
 
 
 @dataclass(frozen=True)
 class MouseClickWindowSlot:
+    slot_number: int
+
+
+@dataclass(frozen=True)
+class MouseDismissWindowSlot:
     slot_number: int
 
 
@@ -295,6 +329,7 @@ class MouseScrollWindowSelection:
 BackendEvent = (
     AppWindowsResolved
     | WindowListRefreshed
+    | WindowSlotDismissed
     | LaunchCompleted
     | ActivationCompleted
     | CapsHoldTriggered
@@ -304,7 +339,9 @@ BackendEvent = (
     | SystemInterruptEvent
     | MouseClickAppSlot
     | MouseToggleLayer
+    | MouseToggleDirectJump
     | MouseHoverWindowSlot
     | MouseClickWindowSlot
+    | MouseDismissWindowSlot
     | MouseScrollWindowSelection
 )

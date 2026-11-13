@@ -14,6 +14,7 @@ from appjuggler.domain.events import (
     BackendEvent,
     CapsHoldTriggered,
     CommitQuickAssignCommand,
+    DismissWindowSlotCommand,
     EnterAssignmentEditing,
     ExitAssignmentEditing,
     HardwareKeyEvent,
@@ -25,8 +26,10 @@ from appjuggler.domain.events import (
     LaunchCompleted,
     MouseClickAppSlot,
     MouseClickWindowSlot,
+    MouseDismissWindowSlot,
     MouseHoverWindowSlot,
     MouseScrollWindowSelection,
+    MouseToggleDirectJump,
     MouseToggleLayer,
     NavCommand,
     OpenAppsForAssignResolved,
@@ -43,8 +46,16 @@ from appjuggler.domain.events import (
     UpdateQuickAssignAppSelectionCommand,
     UpdateWindowSelectionCommand,
     WindowListRefreshed,
+    WindowSlotDismissed,
 )
-from appjuggler.domain.models import AppBinding, AppRecord, Layer, NavState, WindowSlot
+from appjuggler.domain.models import (
+    AppBinding,
+    AppRecord,
+    Layer,
+    NavState,
+    WindowSlot,
+    slot_number_to_badge,
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,8 @@ class NavigationController:
 
         # Active selection context
         self._selected_binding: AppBinding | None = None
+        self._direct_jump_override: bool = False
+        self._active_jump_is_direct: bool = False
         self._resolving_windows: bool = False
         self._window_slots: tuple[WindowSlot, ...] = ()
         self._selected_slot: int | None = None
@@ -136,6 +149,11 @@ class NavigationController:
     def window_generation(self) -> int:
         with self._lock:
             return self._window_generation
+
+    @property
+    def direct_jump_override(self) -> bool:
+        with self._lock:
+            return self._direct_jump_override
 
     @property
     def is_waiting_on_backend(self) -> bool:
@@ -312,7 +330,9 @@ class NavigationController:
                         InputAction.PASS_THROUGH,
                         (
                             UpdateAppMapLayerCommand(
-                                op_token=self._op_token, active_layer=self._active_layer
+                                op_token=self._op_token,
+                                active_layer=self._active_layer,
+                                direct_jump=self._direct_jump_override,
                             ),
                         ),
                     )
@@ -350,6 +370,23 @@ class NavigationController:
     def _handle_app_selection_keydown_locked(self, event: HardwareKeyEvent) -> StepResult:
         if event.is_autorepeat or event.other_modifiers_held:
             return StepResult(InputAction.SWALLOW)
+
+        # Tilde / Backtick ('~' / '`') inside Navigator HUD toggles Direct Jump mode
+        # (skips the multi-window/tab picker for the chosen app, jumping straight to it).
+        # Because autorepeat is filtered above, holding '~' while pressing 'T' OR tapping
+        # '~' then 'T' both engage Direct Jump seamlessly.
+        if event.kind is KeyKind.TILDE:
+            self._direct_jump_override = not self._direct_jump_override
+            return StepResult(
+                InputAction.SWALLOW,
+                (
+                    UpdateAppMapLayerCommand(
+                        op_token=self._op_token,
+                        active_layer=self._active_layer,
+                        direct_jump=self._direct_jump_override,
+                    ),
+                ),
+            )
 
         # Optional keyboard shortcut inside Navigator HUD: Tab -> Quick Assign Open App
         # (Only enabled when trigger.enable_caps_hold_assign is opted-in.)
@@ -404,8 +441,11 @@ class NavigationController:
                 ),
             )
 
+        direct_jump = (not binding.show_window_picker) or self._direct_jump_override
         self._op_token += 1
         self._selected_binding = binding
+        self._active_jump_is_direct = direct_jump
+        self._direct_jump_override = False
         self._letter_keydown_ns = keydown_ns
         self._pending_inputs.clear()
         self._window_slots = ()
@@ -414,7 +454,13 @@ class NavigationController:
         if binding.bundle_id in self._running_bundle_ids:
             self._state = NavState.WINDOW_SELECTION
             self._resolving_windows = True
-            return (InspectAppWindowsCommand(op_token=self._op_token, binding=binding),)
+            return (
+                InspectAppWindowsCommand(
+                    op_token=self._op_token,
+                    binding=binding,
+                    direct_jump=direct_jump,
+                ),
+            )
 
         self._state = NavState.LAUNCH_PENDING
         self._resolving_windows = False
@@ -587,13 +633,18 @@ class NavigationController:
         if self._state is NavState.LAUNCH_PENDING or self._resolving_windows:
             if event.other_modifiers_held:
                 return StepResult(InputAction.SWALLOW)
-            if event.kind in (KeyKind.DIGIT, KeyKind.ENTER) and event.is_autorepeat:
+            if (
+                event.kind in (KeyKind.DIGIT, KeyKind.LETTER, KeyKind.ENTER, KeyKind.TILDE)
+                and event.is_autorepeat
+            ):
                 return StepResult(InputAction.SWALLOW)
             if event.kind in (
                 KeyKind.DIGIT,
+                KeyKind.LETTER,
                 KeyKind.ARROW_UP,
                 KeyKind.ARROW_DOWN,
                 KeyKind.ENTER,
+                KeyKind.TILDE,
             ):
                 if len(self._pending_inputs) < self._max_pending_inputs:
                     self._pending_inputs.append(
@@ -604,7 +655,11 @@ class NavigationController:
         if event.other_modifiers_held:
             return StepResult(InputAction.SWALLOW)
 
-        if event.kind in (KeyKind.DIGIT, KeyKind.ENTER) and event.is_autorepeat:
+        if (
+            event.kind
+            in (KeyKind.DIGIT, KeyKind.LETTER, KeyKind.ENTER, KeyKind.TILDE, KeyKind.DELETE)
+            and event.is_autorepeat
+        ):
             return StepResult(InputAction.SWALLOW)
 
         cmds = self._apply_window_selection_input_locked(
@@ -719,6 +774,35 @@ class NavigationController:
                 return ()
             return self._apply_window_list_refresh_locked(event)
 
+        if isinstance(event, WindowSlotDismissed):
+            if (
+                event.op_token != self._op_token
+                or self._state is not NavState.WINDOW_SELECTION
+                or self._selected_binding is None
+                or self._selected_binding.bundle_id != event.bundle_id
+            ):
+                return ()
+            return self._apply_window_slot_dismissed_locked(event)
+
+        if isinstance(event, MouseDismissWindowSlot):
+            if (
+                self._state is not NavState.WINDOW_SELECTION
+                or self._resolving_windows
+                or self._selected_binding is None
+            ):
+                return ()
+            target = self._find_slot_locked(event.slot_number)
+            if target is None:
+                return ()
+            return (
+                DismissWindowSlotCommand(
+                    op_token=self._op_token,
+                    binding=self._selected_binding,
+                    window_id=target.window_id,
+                    slot_number=target.slot_number,
+                ),
+            )
+
         if isinstance(event, ActivationCompleted):
             if event.op_token != self._op_token:
                 return ()
@@ -766,6 +850,7 @@ class NavigationController:
             (
                 MouseClickAppSlot,
                 MouseToggleLayer,
+                MouseToggleDirectJump,
                 MouseHoverWindowSlot,
                 MouseClickWindowSlot,
                 MouseScrollWindowSelection,
@@ -776,6 +861,18 @@ class NavigationController:
         return ()
 
     def _handle_mouse_event_locked(self, event: BackendEvent) -> tuple[NavCommand, ...]:
+        if isinstance(event, MouseToggleDirectJump):
+            if self._state is not NavState.APP_SELECTION:
+                return ()
+            self._direct_jump_override = not self._direct_jump_override
+            return (
+                UpdateAppMapLayerCommand(
+                    op_token=self._op_token,
+                    active_layer=self._active_layer,
+                    direct_jump=self._direct_jump_override,
+                ),
+            )
+
         if not self._enable_mouse_selection:
             return ()
 
@@ -800,7 +897,9 @@ class NavigationController:
                 )
             return (
                 UpdateAppMapLayerCommand(
-                    op_token=self._op_token, active_layer=self._active_layer
+                    op_token=self._op_token,
+                    active_layer=self._active_layer,
+                    direct_jump=self._direct_jump_override,
                 ),
             )
 
@@ -924,12 +1023,18 @@ class NavigationController:
                 ),
             )
 
-        if len(slots) == 1:
+        if len(slots) == 1 or self._active_jump_is_direct:
             self._pending_inputs.clear()
             self._state = NavState.ACTIVATION_PENDING
             self._window_slots = slots
             self._window_generation = generation
-            self._selected_slot = slots[0].slot_number
+            chosen = slots[0]
+            if default_slot is not None:
+                for s in slots:
+                    if s.slot_number == default_slot:
+                        chosen = s
+                        break
+            self._selected_slot = chosen.slot_number
             self._single_window_digit_guard_until_ns = (
                 self._letter_keydown_ns + self._single_window_digit_guard_ns
             )
@@ -937,7 +1042,7 @@ class NavigationController:
                 ActivateWindowCommand(
                     op_token=self._op_token,
                     binding=binding,
-                    slot=slots[0],
+                    slot=chosen,
                     generation=generation,
                     from_launch=from_launch,
                 ),
@@ -1006,10 +1111,13 @@ class NavigationController:
                 )
             ]
 
-        if item.kind is KeyKind.ENTER:
+        if item.kind in (KeyKind.ENTER, KeyKind.TILDE):
             target = self._find_slot_locked(self._selected_slot)
+            if target is None and item.kind is KeyKind.TILDE and self._window_slots:
+                target = self._window_slots[0]
+                self._selected_slot = target.slot_number
             if target is None:
-                msg = "Window list changed — select a window (↑/↓ or 1–9) first"
+                msg = "Window list changed — select a window (↑/↓ or 1–9 / A–Z) first"
                 if emit_show_instead_of_update:
                     return [
                         ShowWindowListCommand(
@@ -1040,6 +1148,20 @@ class NavigationController:
                 )
             ]
 
+        if item.kind is KeyKind.DELETE:
+            target = self._find_slot_locked(self._selected_slot)
+            if target is None:
+                return []
+            return [
+                DismissWindowSlotCommand(
+                    op_token=self._op_token,
+                    binding=self._selected_binding,
+                    window_id=target.window_id,
+                    slot_number=target.slot_number,
+                )
+            ]
+
+        direct_num: int | None = None
         if item.kind is KeyKind.DIGIT and item.symbol in (
             "1",
             "2",
@@ -1051,10 +1173,21 @@ class NavigationController:
             "8",
             "9",
         ):
-            num = int(item.symbol)
-            target = self._find_slot_locked(num)
+            direct_num = int(item.symbol)
+        elif (
+            item.kind is KeyKind.LETTER
+            and item.symbol
+            and len(item.symbol) == 1
+            and "A" <= item.symbol.upper() <= "Z"
+        ):
+            direct_num = 10 + (ord(item.symbol.upper()) - ord("A"))
+
+        if direct_num is not None:
+            target = self._find_slot_locked(direct_num)
             if target is None:
-                msg = f"No window #{num}"
+                badge = slot_number_to_badge(direct_num)
+                prefix = "#" if direct_num <= 9 else ""
+                msg = f"No window {prefix}{badge}"
                 if emit_show_instead_of_update:
                     return [
                         ShowWindowListCommand(
@@ -1075,7 +1208,7 @@ class NavigationController:
                     )
                 ]
 
-            self._selected_slot = num
+            self._selected_slot = direct_num
             self._state = NavState.ACTIVATION_PENDING
             return [
                 ActivateWindowCommand(
@@ -1087,6 +1220,42 @@ class NavigationController:
             ]
 
         return []
+
+    def _apply_window_slot_dismissed_locked(
+        self, event: WindowSlotDismissed
+    ) -> tuple[NavCommand, ...]:
+        assert self._selected_binding is not None
+        if len(event.slots) == 0:
+            self._state = NavState.IDLE
+            self._reset_selection_context_locked()
+            return (
+                ShowStatusBannerCommand(
+                    level="info",
+                    message="Removed from quick list (reappears when active again)",
+                    auto_hide_ms=1800,
+                ),
+            )
+
+        prev_sel = self._selected_slot
+        self._window_slots = event.slots
+        self._window_generation = event.generation
+        slot_nums = [s.slot_number for s in event.slots]
+        if prev_sel in slot_nums:
+            self._selected_slot = prev_sel
+        else:
+            higher = [n for n in slot_nums if n > event.dismissed_slot]
+            self._selected_slot = min(higher) if higher else max(slot_nums)
+
+        return (
+            ShowWindowListCommand(
+                op_token=self._op_token,
+                binding=self._selected_binding,
+                slots=self._window_slots,
+                selected_slot=self._selected_slot,
+                generation=self._window_generation,
+                notice=None,
+            ),
+        )
 
     def _apply_window_list_refresh_locked(
         self, event: WindowListRefreshed
@@ -1150,6 +1319,8 @@ class NavigationController:
 
     def _reset_selection_context_locked(self) -> None:
         self._selected_binding = None
+        self._direct_jump_override = False
+        self._active_jump_is_direct = False
         self._resolving_windows = False
         self._window_slots = ()
         self._selected_slot = None

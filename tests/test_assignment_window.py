@@ -209,3 +209,41 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
         > float(captions[0].frame().origin.y)
         > float(puffy_cards[0].frame().origin.y)
     )
+
+
+def test_per_slot_show_window_picker_checkbox_persists_and_updates_summary(
+    tmp_path: Path,
+) -> None:
+    from appjuggler.domain.models import AppBinding, Layer
+
+    ctrl = _make_controller(tmp_path)
+    chk = ctrl._slot_window_picker_checkbox
+    assert chk is not None
+
+    ctrl._store.assign(
+        AppBinding(
+            key="T",
+            layer=Layer.BASE,
+            bundle_id="com.apple.Terminal",
+            display_name="Terminal",
+        ),
+        allow_replace=True,
+    )
+    ctrl.refresh_data()
+    ctrl._handle_key_typed("T")
+    assert chk.state() == Cocoa.NSControlStateValueOn
+    assert "[~ Direct Jump]" not in str(ctrl._slot_summary_label.stringValue())
+
+    # Uncheck 'Show Window / Tab List' -> switches Terminal slot to Direct Jump
+    chk.setState_(Cocoa.NSControlStateValueOff)
+    ctrl._handle_toggle_slot_window_picker()
+    slot_t = ctrl._store.get_slot("T", Layer.BASE)
+    assert slot_t is not None and slot_t.show_window_picker is False
+    assert "[~ Direct Jump]" in str(ctrl._slot_summary_label.stringValue())
+
+    # Re-check 'Show Window / Tab List' -> restores normal window/tab picker
+    chk.setState_(Cocoa.NSControlStateValueOn)
+    ctrl._handle_toggle_slot_window_picker()
+    slot_t2 = ctrl._store.get_slot("T", Layer.BASE)
+    assert slot_t2 is not None and slot_t2.show_window_picker is True
+    assert "[~ Direct Jump]" not in str(ctrl._slot_summary_label.stringValue())

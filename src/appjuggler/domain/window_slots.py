@@ -134,6 +134,15 @@ class WindowSlotTable:
         with self._lock:
             self._mru_window_id[bundle_id] = window_id
 
+    def dismiss_window(self, bundle_id: str, window_id: str) -> None:
+        """Release slot assignment for a window hidden from the quick-choice list."""
+        with self._lock:
+            slot_map = self._assigned_slots.get(bundle_id)
+            if slot_map is not None:
+                slot_map.pop(window_id, None)
+            if self._mru_window_id.get(bundle_id) == window_id:
+                del self._mru_window_id[bundle_id]
+
     def clear_app(self, bundle_id: str) -> None:
         """Clear session slots when an application completely terminates."""
         with self._lock:

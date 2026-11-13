@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from appjuggler.domain.models import DiscoveredWindow
+from appjuggler.domain.models import (
+    DiscoveredWindow,
+    slot_number_has_direct_key,
+    slot_number_to_badge,
+)
 from appjuggler.domain.window_slots import WindowSlotTable
 
 
@@ -88,3 +92,32 @@ def test_mru_recording_and_over_nine_windows_ordering() -> None:
     table.record_activated("com.apple.Terminal", "w11")
     snap2 = table.reconcile("com.apple.Terminal", twelve_wins)
     assert snap2.default_slot == 11
+
+
+def test_alphanumeric_slot_badges_and_dismiss_window_slot_release() -> None:
+    assert slot_number_to_badge(1) == "1"
+    assert slot_number_to_badge(9) == "9"
+    assert slot_number_to_badge(10) == "A"
+    assert slot_number_to_badge(11) == "B"
+    assert slot_number_to_badge(35) == "Z"
+    assert slot_number_to_badge(36) == "36"
+    assert slot_number_has_direct_key(35) is True
+    assert slot_number_has_direct_key(36) is False
+
+    table = WindowSlotTable()
+    twelve = [_win(f"w{i}", f"Tab {i}", hint=i) for i in range(1, 13)]
+    snap = table.reconcile("com.apple.Terminal", twelve)
+    assert [s.badge_label for s in snap.slots] == [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C"
+    ]
+    assert all(s.has_direct_key for s in snap.slots)
+
+    # Record w10 ('A') as MRU, then dismiss w10 -> MRU clears and remaining slots keep their numbers
+    table.record_activated("com.apple.Terminal", "w10")
+    table.dismiss_window("com.apple.Terminal", "w10")
+    remaining = [w for w in twelve if w.window_id != "w10"]
+    snap_after = table.reconcile("com.apple.Terminal", remaining)
+    assert [s.badge_label for s in snap_after.slots] == [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "B", "C"
+    ]
+    assert snap_after.default_slot == 1

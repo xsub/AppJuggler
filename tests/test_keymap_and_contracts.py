@@ -23,6 +23,10 @@ from appjuggler.platforms.macos.keymap import (
     FLAG_ALPHA_SHIFT,
     FLAG_SHIFT,
     VK_CAPS_LOCK,
+    VK_DELETE,
+    VK_FORWARD_DELETE,
+    VK_GRAVE,
+    VK_ISO_SECTION,
     KeyEventDecoder,
 )
 
@@ -78,3 +82,16 @@ def test_linux_stubs_implement_adapter_protocols() -> None:
     status = LinuxPermissionMonitor().check_status()
     assert not status.is_ready
     assert any("TODO(linux)" in step for step in status.remediation_steps)
+
+
+def test_tilde_and_delete_key_decoding() -> None:
+    decoder = KeyEventDecoder(initial_caps_on=False)
+    for kc in (VK_GRAVE, VK_ISO_SECTION):
+        ev_plain = decoder.decode_key_event(kc, 0, True, False, 100)
+        ev_shift = decoder.decode_key_event(kc, FLAG_SHIFT, True, False, 110)
+        assert ev_plain.kind is KeyKind.TILDE
+        assert ev_shift.kind is KeyKind.TILDE
+
+    for kc in (VK_DELETE, VK_FORWARD_DELETE):
+        ev_del = decoder.decode_key_event(kc, 0, True, False, 120)
+        assert ev_del.kind is KeyKind.DELETE

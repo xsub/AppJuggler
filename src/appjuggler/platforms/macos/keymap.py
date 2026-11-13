@@ -21,6 +21,10 @@ VK_CAPS_LOCK = 57
 VK_ESCAPE = 53
 VK_TAB = 48
 VK_COMMA = 43
+VK_GRAVE = 50
+VK_ISO_SECTION = 10
+VK_DELETE = 51
+VK_FORWARD_DELETE = 117
 VK_RETURN = 36
 VK_KEYPAD_ENTER = 76
 VK_UP_ARROW = 126
@@ -289,6 +293,9 @@ class KeyEventDecoder:
         elif keycode == VK_DOWN_ARROW:
             kind = KeyKind.ARROW_DOWN
             symbol = None
+        elif keycode in (VK_DELETE, VK_FORWARD_DELETE):
+            kind = KeyKind.DELETE
+            symbol = None
         elif keycode in KEYCODE_TO_DIGIT:
             kind = KeyKind.DIGIT
             symbol = KEYCODE_TO_DIGIT[keycode]
@@ -300,6 +307,9 @@ class KeyEventDecoder:
             elif keycode == VK_COMMA:
                 kind = KeyKind.COMMA
                 symbol = None
+            elif keycode in (VK_GRAVE, VK_ISO_SECTION):
+                kind = KeyKind.TILDE
+                symbol = "~"
             else:
                 kind = KeyKind.OTHER_KEY
                 symbol = None

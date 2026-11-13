@@ -347,6 +347,9 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
     def mouseSelectionToggled_(self, _sender) -> None:
         self._cb["on_toggle_mouse_selection"]()
 
+    def slotWindowPickerToggled_(self, _sender) -> None:
+        self._cb["on_toggle_slot_window_picker"]()
+
     def openAnimationsClicked_(self, _sender) -> None:
         self._cb["on_open_animations"]()
 
@@ -392,6 +395,7 @@ class AssignmentEditorController:
         self._layer_seg = None
         self._filter_seg = None
         self._slot_summary_label = None
+        self._slot_window_picker_checkbox = None
         self._app_popup = None
         self._path_popup = None
         self._conflict_label = None
@@ -497,6 +501,7 @@ class AssignmentEditorController:
                 "on_toggle_auto_fullscreen": self._handle_toggle_auto_fullscreen,
                 "on_toggle_auto_maximize": self._handle_toggle_auto_maximize,
                 "on_toggle_mouse_selection": self._handle_toggle_mouse_selection,
+                "on_toggle_slot_window_picker": self._handle_toggle_slot_window_picker,
                 "on_toggle_caps_hold": self._handle_toggle_caps_hold,
                 "on_open_animations": self._handle_open_animations,
                 "on_repair_config": self._handle_repair_config,
@@ -635,13 +640,26 @@ class AssignmentEditorController:
         content.addSubview_(map_box)
         self._grid_view = grid
 
-        # Selected slot summary + Clear button
+        # Selected slot summary + per-slot Window/Tab List toggle + Clear button
         row1_y = map_y - 40.0
         slot_lbl = Cocoa.NSTextField.labelWithString_("Selected Slot: T (Base)")
-        slot_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row1_y + 4.0, win_w - 200.0, 22.0))
+        slot_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row1_y + 4.0, win_w - 384.0, 22.0))
         slot_lbl.setFont_(theme.font_ui(13.5, bold=True))
+        slot_lbl.setLineBreakMode_(Cocoa.NSLineBreakByTruncatingMiddle)
         content.addSubview_(slot_lbl)
         self._slot_summary_label = slot_lbl
+
+        slot_picker_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Show Window / Tab List",
+            self._delegate,
+            "slotWindowPickerToggled:",
+        )
+        slot_picker_chk.setFrame_(
+            Cocoa.NSMakeRect(win_w - 352.0, row1_y + 3.0, 202.0, 22.0)
+        )
+        slot_picker_chk.setState_(Cocoa.NSControlStateValueOn)
+        content.addSubview_(slot_picker_chk)
+        self._slot_window_picker_checkbox = slot_picker_chk
 
         clear_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
             "Clear Slot", self._delegate, "clearSlotClicked:"
@@ -918,6 +936,12 @@ class AssignmentEditorController:
     def _update_slot_summary(self) -> None:
         prefix = "⇧" if self._layer is Layer.SHIFT else ""
         existing = self._store.get_slot(self._selected_key, self._layer)
+        if self._slot_window_picker_checkbox is not None:
+            self._slot_window_picker_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if (existing is None or existing.show_window_picker)
+                else Cocoa.NSControlStateValueOff
+            )
         if existing is None:
             text = f"Selected Slot: {prefix}{self._selected_key} ({self._layer.label})  —  [Empty / Available]"
         else:
@@ -929,9 +953,10 @@ class AssignmentEditorController:
                 state_note = "  ⚠️ BUNDLE MISSING ON DISK"
             elif len(paths) > 1:
                 state_note = f"  ⚠️ MULTIPLE INSTALLS ({len(paths)} copies)"
+            mode_note = "" if existing.show_window_picker else "  ·  [~ Direct Jump]"
             text = (
                 f"Selected Slot: {prefix}{self._selected_key} ({self._layer.label})  →  "
-                f"{existing.display_name} ({existing.bundle_id}){state_note}"
+                f"{existing.display_name} ({existing.bundle_id}){mode_note}{state_note}"
             )
         self._slot_summary_label.setStringValue_(text)
 
@@ -1023,12 +1048,21 @@ class AssignmentEditorController:
             if p_title.startswith("/"):
                 chosen_path = p_title
 
+        picker_enabled = (
+            True
+            if self._slot_window_picker_checkbox is None
+            else bool(
+                self._slot_window_picker_checkbox.state()
+                == Cocoa.NSControlStateValueOn
+            )
+        )
         new_binding = AppBinding(
             key=self._selected_key,
             layer=self._layer,
             bundle_id=rec.bundle_id,
             display_name=rec.display_name,
             bundle_path=chosen_path,
+            show_window_picker=picker_enabled,
         )
 
         try:
@@ -1249,6 +1283,45 @@ class AssignmentEditorController:
         state_txt = "enabled" if enabled else "disabled"
         self._set_feedback(f"Mouse Hover & Click in HUD {state_txt}", is_error=False)
         self._on_config_updated()
+
+    def _handle_toggle_slot_window_picker(self) -> None:
+        if self._slot_window_picker_checkbox is None:
+            return
+        enabled = bool(
+            self._slot_window_picker_checkbox.state() == Cocoa.NSControlStateValueOn
+        )
+        prefix = "⇧" if self._layer is Layer.SHIFT else ""
+        existing = self._store.get_slot(self._selected_key, self._layer)
+        if existing is None:
+            mode_txt = "Window / Tab List" if enabled else "Direct Jump (~)"
+            self._set_feedback(
+                f"Slot {prefix}{self._selected_key}: will assign with {mode_txt}",
+                is_error=False,
+            )
+            return
+
+        try:
+            self._store.set_slot_window_picker(
+                self._selected_key, self._layer, enabled
+            )
+        except CorruptedConfigLockError as exc:
+            self._show_alert("Configuration Locked", str(exc))
+            return
+        except Exception as exc:
+            self._set_feedback(f"Could not save slot option: {exc}", is_error=True)
+            return
+
+        mode_txt = (
+            "Show Window / Tab List"
+            if enabled
+            else "Direct Jump (skips window list)"
+        )
+        self._set_feedback(
+            f"{prefix}{self._selected_key} ({existing.display_name}): {mode_txt}",
+            is_error=False,
+        )
+        self._on_config_updated()
+        self.refresh_data()
 
     def _handle_toggle_caps_hold(self) -> None:
         if self._caps_hold_checkbox is None:

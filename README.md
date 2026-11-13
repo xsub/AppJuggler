@@ -16,7 +16,8 @@ AppJuggler replaces hunting through `Cmd+Tab`, the Dock, and Mission Control wit
 2. **Press `A–Z` (or `⇧Shift + A–Z`)** — selects one of **52 persistent application slots** (keyed by `bundle_id`, never lost when apps quit or macOS restarts).
 3. **Jump immediately or pick a window**:
    - **1 window**: activates immediately — no extra keystroke needed.
-   - **Multiple windows**: press **`1–9`** for instant direct jump, or **`↑` / `↓` + `Enter`** (supports `>9` windows), or **`Esc`** to cancel.
+   - **Multiple windows / tabs**: press **`1–9`** for slots `1–9` or **`A–Z`** for slots `10–35` (`10 → A`, `11 → B`, …), or **`↑` / `↓` + `Enter`**, or click **`×`** on the right of any row (or press `⌫`) to hide a tab/window from the quick list until you invoke that app on that tab again.
+   - **Direct Jump (`~` modifier or per-app setting)**: press **`~`** (`Caps ×2 → ~ → T`) to jump straight to any app's active/MRU window without showing the window/tab list, or uncheck **`Show Window / Tab List`** for specific apps in `Edit Assignments…`.
    - **Closed app**: launches the app asynchronously, observes window creation without fixed `sleep` delays, and activates the target once ready.
 
 Fast sequences such as `Caps ×2 → T → 3` are processed immediately by an O(1) lock-free/microsecond state machine on a dedicated `CGEventTap` thread — you never have to wait for panel animations or window enumeration to finish before typing the chord.

@@ -110,10 +110,17 @@ class WindowRegistry(Protocol):
     """Enumerates qualifying user windows for a running application."""
 
     def discover_windows(
-        self, bundle_id: str, timeout_sec: float = 0.8
+        self,
+        bundle_id: str,
+        timeout_sec: float = 0.8,
+        include_dismissed: bool = False,
     ) -> tuple[DiscoveredWindow, ...]: ...
 
     def is_window_alive(self, window: DiscoveredWindow) -> bool: ...
+
+    def dismiss_window(self, bundle_id: str, window_id: str) -> None: ...
+
+    def note_application_activated(self, bundle_id: str) -> None: ...
 
 
 @runtime_checkable
@@ -148,9 +155,12 @@ class OverlayPresenter(Protocol):
         running_bundle_ids: frozenset[str],
         duplicate_conflicts: frozenset[str],
         notice: str | None = None,
+        direct_jump: bool = False,
     ) -> None: ...
 
-    def update_app_map_layer(self, active_layer: Layer) -> None: ...
+    def update_app_map_layer(
+        self, active_layer: Layer, direct_jump: bool = False
+    ) -> None: ...
 
     def show_launch_pending(self, binding: AppBinding) -> None: ...
 
