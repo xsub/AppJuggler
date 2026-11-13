@@ -6,6 +6,10 @@
 
 > **Jump straight to any app or window from your keyboard.**
 
+<p align="center">
+  <img src="docs/assets/hud_overlay.jpg" width="900" alt="AppJuggler HUD keyboard map overlay" />
+</p>
+
 AppJuggler replaces hunting through `Cmd+Tab`, the Dock, and Mission Control with muscle-memory keyboard addresses:
 
 1. **Double-tap `Caps Lock`** (`Caps Lock ×2`, default `300 ms`) — opens the non-activating keyboard map overlay while naturally restoring your original Caps Lock state and LED.
