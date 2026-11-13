@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import importlib.resources
+import math
 from pathlib import Path
 from typing import Callable
 
 import Cocoa
 import objc
 
+from appjuggler import CONTACT_EMAIL
 from appjuggler.contracts import ApplicationRegistry
 from appjuggler.domain.models import AppBinding, AppRecord, Layer
 from appjuggler.persistence.binding_store import (
@@ -273,6 +275,125 @@ class _FullWidthCaptionView(Cocoa.NSView):
             x += w + gap
 
 
+class _CopyableAddressButton(Cocoa.NSButton):
+    """Contact address under the logo: a click copies it to the clipboard and confirms in place."""
+
+    CONFIRMATION_TEXT = "Copied to clipboard"
+    CONFIRMATION_SECONDS = 1.6
+    FONT_SIZE = 10.5
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_CopyableAddressButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._address: str = ""
+        self._pasteboard = None
+        self._hovered: bool = False
+        self._showing_confirmation: bool = False
+        self._tracking_area = None
+        self.setBordered_(False)
+        self.setButtonType_(Cocoa.NSButtonTypeMomentaryPushIn)
+        self.setFocusRingType_(Cocoa.NSFocusRingTypeNone)
+        self.setToolTip_("Click to copy")
+        self.setTarget_(self)
+        self.setAction_("copyAddress:")
+        return self
+
+    @objc.python_method
+    def configure(self, address: str, pasteboard=None) -> None:
+        """Set the address to show; `pasteboard` defaults to the general (system) clipboard."""
+        self._address = address
+        self._pasteboard = pasteboard
+        self.setAccessibilityLabel_(f"Copy {address} to the clipboard")
+        self._refresh_title()
+
+    def acceptsFirstMouse_(self, _event) -> bool:
+        return True
+
+    def resetCursorRects(self) -> None:
+        self.addCursorRect_cursor_(self.bounds(), Cocoa.NSCursor.pointingHandCursor())
+
+    def updateTrackingAreas(self) -> None:
+        objc.super(_CopyableAddressButton, self).updateTrackingAreas()
+        if self._tracking_area is not None:
+            self.removeTrackingArea_(self._tracking_area)
+        opts = (
+            Cocoa.NSTrackingMouseEnteredAndExited
+            | Cocoa.NSTrackingActiveAlways
+            | Cocoa.NSTrackingInVisibleRect
+        )
+        area = Cocoa.NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            Cocoa.NSZeroRect, opts, self, None
+        )
+        self.addTrackingArea_(area)
+        self._tracking_area = area
+
+    def mouseEntered_(self, _event) -> None:
+        self._hovered = True
+        self._refresh_title()
+
+    def mouseExited_(self, _event) -> None:
+        self._hovered = False
+        self._refresh_title()
+
+    def copyAddress_(self, _sender) -> None:
+        if not self._address:
+            return
+        pb = self._pasteboard
+        if pb is None:
+            pb = Cocoa.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(self._address, Cocoa.NSPasteboardTypeString)
+
+        self._showing_confirmation = True
+        self._refresh_title()
+        Cocoa.NSObject.cancelPreviousPerformRequestsWithTarget_selector_object_(
+            self, "endConfirmation:", None
+        )
+        self.performSelector_withObject_afterDelay_(
+            "endConfirmation:", None, self.CONFIRMATION_SECONDS
+        )
+
+    def endConfirmation_(self, _arg) -> None:
+        self._showing_confirmation = False
+        self._refresh_title()
+
+    @objc.python_method
+    def _refresh_title(self) -> None:
+        confirming = self._showing_confirmation
+        text = self.CONFIRMATION_TEXT if confirming else self._address
+        if confirming:
+            color = Cocoa.NSColor.systemGreenColor()
+        elif self._hovered:
+            color = Cocoa.NSColor.labelColor()
+        else:
+            color = Cocoa.NSColor.secondaryLabelColor()
+
+        # Shrink slightly if the text would not fit the column.
+        font = theme.font_ui(self.FONT_SIZE, bold=confirming)
+        avail_w = float(self.bounds().size.width)
+        natural_w = float(
+            Cocoa.NSString.stringWithString_(text)
+            .sizeWithAttributes_({Cocoa.NSFontAttributeName: font})
+            .width
+        )
+        if natural_w > avail_w > 0.0:
+            font = theme.font_ui(self.FONT_SIZE * avail_w / natural_w, bold=confirming)
+
+        style = Cocoa.NSMutableParagraphStyle.alloc().init()
+        style.setAlignment_(Cocoa.NSTextAlignmentCenter)
+        attrs = {
+            Cocoa.NSFontAttributeName: font,
+            Cocoa.NSForegroundColorAttributeName: color,
+            Cocoa.NSParagraphStyleAttributeName: style,
+        }
+        if self._hovered and not confirming:
+            attrs[Cocoa.NSUnderlineStyleAttributeName] = Cocoa.NSUnderlineStyleSingle
+        self.setAttributedTitle_(
+            Cocoa.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        )
+
+
 class _AssignmentWindowDelegate(Cocoa.NSObject):
     def initWithCallbacks_(
         self,
@@ -407,6 +528,8 @@ class AssignmentEditorController:
         self._anim_status_label = None
         self._status_label = None
         self._repair_btn = None
+        self._status_w: float = 0.0
+        self._status_w_beside_repair: float = 0.0
 
     def _mark_editing_active(self) -> None:
         if not self._editing_active:
@@ -427,6 +550,7 @@ class AssignmentEditorController:
     def _clear_transient_feedback(self) -> None:
         if self._status_label is not None and not self._store.load_error:
             self._status_label.setStringValue_("")
+            self._status_label.setToolTip_(None)
 
     def show_window(self) -> None:
         if self._window is None:
@@ -518,14 +642,17 @@ class AssignmentEditorController:
 
         content = win.contentView()
 
-        # --- Top Header: Left (AppJuggler Logo + Name + Subtitle) | Right (Quit + AI - Engineered By + Puffy Clouds) ---
+        # --- Top Header: Left (AppJuggler Logo + Name + Subtitle) | Right (AI - Engineered By + Puffy Clouds + contact address) ---
         col_w = 138.0
         col_x = win_w - 20.0 - col_w
         hdr_sep_y = win_h - 116.0
-        badge_y = hdr_sep_y + 12.0
+        # Right column, bottom to top: contact address, logo, caption. The 80pt stack is centred
+        # on the 88pt app icon and kept on whole points so it stays crisp on non-Retina displays.
+        address_h = 15.0
+        address_y = hdr_sep_y + 15.0
+        badge_y = address_y + address_h + 4.0
         badge_h = 42.0
         caption_y = badge_y + badge_h + 4.0
-        quit_y = caption_y + 12.0
 
         app_logo_img = self._load_app_icon()
         app_logo_view = _HighQualityImageView.alloc().initWithFrame_(
@@ -551,15 +678,6 @@ class AssignmentEditorController:
             Cocoa.NSMakeRect(105.0, hdr_sep_y + 30.0, col_x - 122.0, 20.0)
         )
         content.addSubview_(subtitle_lbl)
-
-        quit_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
-            "Quit AppJuggler", self._delegate, "quitAppClicked:"
-        )
-        quit_btn.setBezelStyle_(Cocoa.NSBezelStyleRounded)
-        # NSBezelStyleRounded insets its visible pill by 7pt horizontally on each side;
-        # expanding the frame by 7pt aligns the visible button edges 1:1 with col_x..col_x+col_w.
-        quit_btn.setFrame_(Cocoa.NSMakeRect(col_x - 7.0, quit_y, col_w + 14.0, 32.0))
-        content.addSubview_(quit_btn)
 
         eng_lbl = _FullWidthCaptionView.alloc().initWithFrame_(
             Cocoa.NSMakeRect(col_x, caption_y, col_w, 15.0)
@@ -589,6 +707,12 @@ class AssignmentEditorController:
             fallback_lbl.setFrame_(Cocoa.NSMakeRect(4.0, 12.0, col_w - 8.0, 18.0))
             logo_card.addSubview_(fallback_lbl)
         content.addSubview_(logo_card)
+
+        address_btn = _CopyableAddressButton.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(col_x, address_y, col_w, address_h)
+        )
+        address_btn.configure(CONTACT_EMAIL)
+        content.addSubview_(address_btn)
 
         hdr_sep = Cocoa.NSBox.alloc().initWithFrame_(
             Cocoa.NSMakeRect(20.0, hdr_sep_y, win_w - 40.0, 1.0)
@@ -815,7 +939,7 @@ class AssignmentEditorController:
         content.addSubview_(anim_lbl)
         self._anim_status_label = anim_lbl
 
-        # Bottom row: Double-Caps trigger interval (click-only focus!) + status feedback + repair
+        # Bottom row: Double-Caps trigger interval (click-only focus!) + status feedback + repair + Quit
         trig_lbl = Cocoa.NSTextField.labelWithString_("Double-Caps (ms):")
         trig_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row5_y + 3.0, 124.0, 22.0))
         content.addSubview_(trig_lbl)
@@ -834,19 +958,39 @@ class AssignmentEditorController:
         iv_btn.setFrame_(Cocoa.NSMakeRect(212.0, row5_y, 98.0, 28.0))
         content.addSubview_(iv_btn)
 
+        # Quit sits at the far right. Feedback text and the repair button (hidden unless the
+        # config file is damaged) share the space to its left.
+        status_x = 322.0
+        quit_w = 150.0
+        quit_x = win_w - 20.0 - quit_w
+        self._status_w = quit_x - 12.0 - status_x
+
         status_lbl = Cocoa.NSTextField.labelWithString_("")
-        status_lbl.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, win_w - 342.0, 22.0))
+        status_lbl.setFrame_(
+            Cocoa.NSMakeRect(status_x, row5_y + 3.0, self._status_w, 22.0)
+        )
         status_lbl.setFont_(theme.font_ui(12.0, bold=True))
+        status_lbl.setLineBreakMode_(Cocoa.NSLineBreakByTruncatingTail)
         content.addSubview_(status_lbl)
         self._status_label = status_lbl
 
         repair_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
             "Backup & Reset Damaged Config", self._delegate, "repairConfigClicked:"
         )
-        repair_btn.setFrame_(Cocoa.NSMakeRect(win_w - 230.0, row5_y, 210.0, 28.0))
+        # As wide as its title needs: a fixed 210pt used to cut the title short.
+        repair_w = max(210.0, math.ceil(float(repair_btn.cell().cellSize().width)))
+        repair_x = quit_x - 10.0 - repair_w
+        self._status_w_beside_repair = repair_x - 12.0 - status_x
+        repair_btn.setFrame_(Cocoa.NSMakeRect(repair_x, row5_y, repair_w, 28.0))
         repair_btn.setHidden_(True)
         content.addSubview_(repair_btn)
         self._repair_btn = repair_btn
+
+        quit_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
+            "Quit AppJuggler", self._delegate, "quitAppClicked:"
+        )
+        quit_btn.setFrame_(Cocoa.NSMakeRect(quit_x, row5_y, quit_w, 28.0))
+        content.addSubview_(quit_btn)
 
         win.configure_editor_input(
             click_focus_field=iv_field,
@@ -884,12 +1028,16 @@ class AssignmentEditorController:
         self._interval_field.setStringValue_(str(self._store.trigger.interval_ms))
         self._sync_mode_checkboxes_and_anim_summary()
 
-        if self._store.load_error:
-            self._status_label.setStringValue_("Config file error — protected from overwrite")
-            self._status_label.setTextColor_(Cocoa.NSColor.systemRedColor())
-            self._repair_btn.setHidden_(False)
-        else:
-            self._repair_btn.setHidden_(True)
+        damaged = bool(self._store.load_error)
+        self._repair_btn.setHidden_(not damaged)
+        # The repair button takes the right part of the status area while it is visible.
+        self._status_label.setFrameSize_(
+            Cocoa.NSMakeSize(
+                self._status_w_beside_repair if damaged else self._status_w, 22.0
+            )
+        )
+        if damaged:
+            self._set_feedback("Config damaged — not overwritten", is_error=True)
 
         # Populate candidate apps list
         if not self._show_all_apps:
@@ -1359,6 +1507,8 @@ class AssignmentEditorController:
             if is_error
             else Cocoa.NSColor.systemGreenColor()
         )
+        # The label truncates long messages; the tooltip keeps the full text reachable.
+        self._status_label.setToolTip_(msg or None)
 
     @staticmethod
     def _confirm_replace(existing: AppBinding, incoming: AppBinding) -> bool:

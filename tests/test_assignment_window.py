@@ -9,11 +9,13 @@ import pytest
 
 Cocoa = pytest.importorskip("Cocoa")
 
+from appjuggler import CONTACT_EMAIL
 from appjuggler.contracts import ApplicationRegistry
 from appjuggler.domain.models import AppRecord
 from appjuggler.persistence.binding_store import BindingStore
 from appjuggler.platforms.macos.ui.assignment_window import (
     AssignmentEditorController,
+    _CopyableAddressButton,
     _FullWidthCaptionView,
     _HighQualityImageView,
     _RoundedCardView,
@@ -58,7 +60,9 @@ class _StubAppRegistry(ApplicationRegistry):
         pass
 
 
-def _make_controller(tmp_path: Path) -> AssignmentEditorController:
+def _make_controller(
+    tmp_path: Path, on_quit_app: Callable[[], None] | None = None
+) -> AssignmentEditorController:
     Cocoa.NSApplication.sharedApplication()
     store = BindingStore(tmp_path / "config.json")
     store.load()
@@ -68,10 +72,44 @@ def _make_controller(tmp_path: Path) -> AssignmentEditorController:
         on_enter_editing=lambda: None,
         on_exit_editing=lambda: None,
         on_config_updated=lambda: None,
+        # Never fall back to the default, which terminates the process running the tests.
+        on_quit_app=on_quit_app or (lambda: None),
     )
     ctrl._build_window()
     ctrl.refresh_data()
     return ctrl
+
+
+def _content_subviews(ctrl: AssignmentEditorController) -> list:
+    assert ctrl._window is not None
+    return list(ctrl._window.contentView().subviews())
+
+
+def _quit_button(ctrl: AssignmentEditorController):
+    buttons = [
+        v
+        for v in _content_subviews(ctrl)
+        if isinstance(v, Cocoa.NSButton) and str(v.title()) == "Quit AppJuggler"
+    ]
+    assert len(buttons) == 1
+    return buttons[0]
+
+
+def _address_button(ctrl: AssignmentEditorController) -> _CopyableAddressButton:
+    buttons = [
+        v for v in _content_subviews(ctrl) if isinstance(v, _CopyableAddressButton)
+    ]
+    assert len(buttons) == 1
+    return buttons[0]
+
+
+def _shown_text(button) -> str:
+    return str(button.attributedTitle().string())
+
+
+def _is_underlined(button) -> bool:
+    attrs, _ = button.attributedTitle().attributesAtIndex_effectiveRange_(0, None)
+    return bool(attrs.get(Cocoa.NSUnderlineStyleAttributeName))
 
 
 def test_interval_field_not_default_focused_and_typing_selects_slot(
@@ -168,15 +206,9 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
     ctrl = _make_controller(tmp_path)
     win = ctrl._window
     assert win is not None
-    subviews = list(win.contentView().subviews())
-
-    quit_buttons = [
-        v
-        for v in subviews
-        if isinstance(v, Cocoa.NSButton) and str(v.title()) == "Quit AppJuggler"
-    ]
-    assert len(quit_buttons) == 1
-    assert float(quit_buttons[0].frame().origin.y) > 600.0
+    subviews = _content_subviews(ctrl)
+    # The header is the 116pt band above the first separator.
+    header_floor = float(win.contentView().frame().size.height) - 116.0
 
     labels = {
         str(v.stringValue()): v
@@ -185,7 +217,7 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
     }
     assert "AppJuggler" in labels
     assert "Jump straight to any app or window from your keyboard." in labels
-    assert float(labels["AppJuggler"].frame().origin.y) > 600.0
+    assert float(labels["AppJuggler"].frame().origin.y) > header_floor
 
     app_icons = [v for v in subviews if isinstance(v, _HighQualityImageView)]
     assert len(app_icons) == 1
@@ -194,7 +226,6 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
     captions = [v for v in subviews if isinstance(v, _FullWidthCaptionView)]
     assert len(captions) == 1
     assert captions[0]._text == "AI - ENGINEERED BY"
-    assert float(captions[0].frame().origin.y) > 600.0
 
     puffy_cards = [
         v
@@ -202,13 +233,139 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
         if isinstance(v, _RoundedCardView) and v._logo_image is not None
     ]
     assert len(puffy_cards) == 1
-    assert float(puffy_cards[0].frame().origin.y) > 600.0
-    # Verify order on right: Quit (top) > AI - ENGINEERED BY (middle) > Puffy Clouds (bottom)
+
+    address = _address_button(ctrl)
+    assert _shown_text(address) == CONTACT_EMAIL == "hello@puffyclouds.works"
+
+    # Right column, top to bottom: AI - ENGINEERED BY > Puffy Clouds > contact address,
+    # stacked without overlap inside the header and sharing one left edge and width.
+    caption_frame = captions[0].frame()
+    card_frame = puffy_cards[0].frame()
+    address_frame = address.frame()
     assert (
-        float(quit_buttons[0].frame().origin.y)
-        > float(captions[0].frame().origin.y)
-        > float(puffy_cards[0].frame().origin.y)
+        float(caption_frame.origin.y)
+        >= Cocoa.NSMaxY(card_frame)
+        > float(card_frame.origin.y)
+        >= Cocoa.NSMaxY(address_frame)
+        > float(address_frame.origin.y)
+        > header_floor
     )
+    assert Cocoa.NSMaxY(caption_frame) < float(win.contentView().frame().size.height)
+    for frame in (caption_frame, address_frame):
+        assert float(frame.origin.x) == float(card_frame.origin.x)
+        assert float(frame.size.width) == float(card_frame.size.width)
+
+    # Nothing else lives in the header: Quit moved to the bottom row.
+    header_buttons = [
+        v
+        for v in subviews
+        if isinstance(v, Cocoa.NSButton)
+        and v is not address
+        and Cocoa.NSMaxY(v.frame()) > header_floor
+    ]
+    assert header_buttons == []
+
+
+def test_quit_button_sits_at_right_end_of_bottom_row_and_quits(
+    tmp_path: Path,
+) -> None:
+    quit_calls: list[bool] = []
+    ctrl = _make_controller(tmp_path, on_quit_app=lambda: quit_calls.append(True))
+    assert ctrl._window is not None and ctrl._status_label is not None
+    content_w = float(ctrl._window.contentView().frame().size.width)
+
+    quit_btn = _quit_button(ctrl)
+    quit_frame = quit_btn.frame()
+    # Same baseline as the other bottom-row buttons, flush with the 20pt right margin
+    assert float(quit_frame.origin.y) == 12.0
+    assert Cocoa.NSMaxX(quit_frame) == content_w - 20.0
+
+    # Feedback text ends before Quit; the repair button stays hidden for a healthy config
+    assert Cocoa.NSMaxX(ctrl._status_label.frame()) <= float(quit_frame.origin.x)
+    assert ctrl._repair_btn.isHidden()
+
+    quit_btn.performClick_(None)
+    assert quit_calls == [True]
+
+
+def test_damaged_config_repair_button_fits_between_feedback_and_quit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text("{ broken json: [1, 2, ", encoding="utf-8")
+    ctrl = _make_controller(tmp_path)
+    status = ctrl._status_label
+    repair = ctrl._repair_btn
+    assert status is not None and repair is not None
+    quit_x = float(_quit_button(ctrl).frame().origin.x)
+
+    assert not repair.isHidden()
+    assert str(status.stringValue()) == "Config damaged — not overwritten"
+    assert Cocoa.NSMaxX(status.frame()) <= float(repair.frame().origin.x)
+    assert Cocoa.NSMaxX(repair.frame()) <= quit_x
+    # Neither the message nor the repair button's title is cut short
+    assert float(status.cell().cellSize().width) <= float(status.frame().size.width)
+    assert float(repair.cell().cellSize().width) <= float(repair.frame().size.width)
+
+    # Backup & reset hides the button again and gives the feedback its full width back
+    ctrl._handle_repair_config()
+    assert repair.isHidden()
+    assert str(status.stringValue()).startswith("Backed up damaged file to ")
+    assert float(repair.frame().origin.x) < Cocoa.NSMaxX(status.frame()) <= quit_x
+
+
+def test_feedback_tooltip_carries_full_message_and_clears_with_it(
+    tmp_path: Path,
+) -> None:
+    ctrl = _make_controller(tmp_path)
+    status = ctrl._status_label
+    assert status is not None
+
+    ctrl._set_feedback("Saved R → Microsoft Teams", is_error=False)
+    assert str(status.toolTip()) == "Saved R → Microsoft Teams"
+
+    ctrl._clear_transient_feedback()
+    assert str(status.stringValue()) == ""
+    assert status.toolTip() is None
+
+
+def test_contact_address_click_copies_to_clipboard_and_confirms(
+    tmp_path: Path,
+) -> None:
+    ctrl = _make_controller(tmp_path)
+    address = _address_button(ctrl)
+
+    # A private pasteboard keeps the test away from the user's real clipboard.
+    pasteboard = Cocoa.NSPasteboard.pasteboardWithUniqueName()
+    try:
+        address.configure(CONTACT_EMAIL, pasteboard=pasteboard)
+        assert pasteboard.stringForType_(Cocoa.NSPasteboardTypeString) is None
+
+        address.performClick_(None)
+        assert (
+            str(pasteboard.stringForType_(Cocoa.NSPasteboardTypeString))
+            == CONTACT_EMAIL
+        )
+        assert _shown_text(address) == "Copied to clipboard"
+
+        # The confirmation is temporary: the address comes back when the timer fires
+        address.endConfirmation_(None)
+        assert _shown_text(address) == CONTACT_EMAIL
+    finally:
+        Cocoa.NSObject.cancelPreviousPerformRequestsWithTarget_(address)
+        pasteboard.releaseGlobally()
+
+
+def test_contact_address_underlines_on_hover_only(tmp_path: Path) -> None:
+    ctrl = _make_controller(tmp_path)
+    address = _address_button(ctrl)
+    assert not _is_underlined(address)
+
+    address.mouseEntered_(None)
+    assert _is_underlined(address)
+    assert _shown_text(address) == CONTACT_EMAIL
+
+    address.mouseExited_(None)
+    assert not _is_underlined(address)
 
 
 def test_per_slot_show_window_picker_checkbox_persists_and_updates_summary(
