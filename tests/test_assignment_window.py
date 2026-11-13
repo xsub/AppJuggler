@@ -13,7 +13,7 @@ from appjuggler import CONTACT_EMAIL
 from appjuggler.contracts import ApplicationRegistry
 from appjuggler.domain.models import AppRecord
 from appjuggler.persistence.binding_store import BindingStore
-from appjuggler.build_info import BuildInfo
+from appjuggler import build_info
 from appjuggler.platforms.macos.ui.assignment_window import (
     AssignmentEditorController,
     _CopyableAddressButton,
@@ -21,7 +21,6 @@ from appjuggler.platforms.macos.ui.assignment_window import (
     _HighQualityImageView,
     _LinkButton,
     _RoundedCardView,
-    _about_popover_content,
 )
 
 
@@ -267,12 +266,14 @@ def test_header_contains_logo_heading_subtitle_and_right_aligned_branding(
         assert float(frame.origin.x) == float(card_frame.origin.x)
         assert float(frame.size.width) == float(card_frame.size.width)
 
-    # Nothing else lives in the header: Quit moved to the bottom row.
+    # Nothing else is visible in the header: Quit moved to the bottom row, and the
+    # version links stay hidden until a logo is clicked.
     header_buttons = [
         v
         for v in subviews
         if isinstance(v, Cocoa.NSButton)
         and v is not address
+        and not v.isHidden()
         and Cocoa.NSMaxY(v.frame()) > header_floor
     ]
     assert header_buttons == []
@@ -418,19 +419,7 @@ def test_per_slot_show_window_picker_checkbox_persists_and_updates_summary(
     assert "[~ Direct Jump]" not in str(ctrl._slot_summary_label.stringValue())
 
 
-class _RecordingPopover:
-    def __init__(self) -> None:
-        self.shown_below: list[object] = []
-
-    def toggle_below(self, view) -> None:
-        self.shown_below.append(view)
-
-    def close(self) -> None:
-        pass
-
-
-def test_clicking_either_logo_opens_the_version_popup_below_it(tmp_path: Path) -> None:
-    ctrl = _make_controller(tmp_path)
+def _logos(ctrl: AssignmentEditorController):
     subviews = _content_subviews(ctrl)
     app_icon = next(v for v in subviews if isinstance(v, _HighQualityImageView))
     puffy_card = next(
@@ -439,51 +428,76 @@ def test_clicking_either_logo_opens_the_version_popup_below_it(tmp_path: Path) -
     keyboard_map_card = next(
         v for v in subviews if isinstance(v, _RoundedCardView) and v._logo_image is None
     )
-    recorder = _RecordingPopover()
-    ctrl._about_popover = recorder
+    return app_icon, puffy_card, keyboard_map_card
+
+
+def test_clicking_either_logo_toggles_version_details_in_the_header(tmp_path: Path) -> None:
+    ctrl = _make_controller(tmp_path)
+    app_icon, puffy_card, keyboard_map_card = _logos(ctrl)
+    links = [v for v in _content_subviews(ctrl) if isinstance(v, _LinkButton)]
+    title = ctrl._title_lbl
+    details = build_info.version_and_build(build_info.current())
+
+    assert str(title.stringValue()) == "AppJuggler 1.9"
+    assert len(links) == 2 and all(link.isHidden() for link in links)
 
     app_icon.mouseDown_(None)
-    assert puffy_card.accessibilityPerformPress()
-    assert recorder.shown_below == [app_icon, puffy_card]
+    assert str(title.stringValue()) == f"AppJuggler 1.9 {details}"
+    assert not any(link.isHidden() for link in links)
+    # The details are smaller and greyed, on the title's line.
+    shown = title.attributedStringValue()
+    attrs, _ = shown.attributesAtIndex_effectiveRange_(shown.length() - 1, None)
+    assert float(attrs[Cocoa.NSFontAttributeName].pointSize()) == 13.0
+    assert attrs[Cocoa.NSForegroundColorAttributeName] == Cocoa.NSColor.secondaryLabelColor()
 
-    # Both logos read as buttons to VoiceOver; the keyboard map card stays a plain view.
+    # The Puffy Clouds logo (here pressed through VoiceOver) hides them again.
+    assert puffy_card.accessibilityPerformPress()
+    assert str(title.stringValue()) == "AppJuggler 1.9"
+    assert all(link.isHidden() for link in links)
+
+    # Closing the window hides them as well.
+    app_icon.mouseDown_(None)
+    ctrl._handle_close()
+    assert str(title.stringValue()) == "AppJuggler 1.9"
+    assert all(link.isHidden() for link in links)
+
     for logo in (app_icon, puffy_card):
         assert logo.isAccessibilityElement()
         assert str(logo.accessibilityRole()) == str(Cocoa.NSAccessibilityButtonRole)
-        assert str(logo.accessibilityLabel()) == "Version information"
     assert keyboard_map_card._on_click is None
     assert not keyboard_map_card.accessibilityPerformPress()
 
 
-def test_version_popup_shows_version_build_license_and_links() -> None:
-    opened: list[str] = []
-    content = _about_popover_content(BuildInfo(version="2611", build="ae57acf"), opened.append)
-    subviews = list(content.subviews())
-
-    labels = [
-        str(v.stringValue())
+def test_version_links_sit_under_the_subtitle_and_open_their_pages(tmp_path: Path) -> None:
+    ctrl = _make_controller(tmp_path)
+    _, puffy_card, _ = _logos(ctrl)
+    subviews = _content_subviews(ctrl)
+    subtitle = next(
+        v
         for v in subviews
-        if isinstance(v, Cocoa.NSTextField) and not isinstance(v, Cocoa.NSButton)
-    ]
-    assert labels == [
-        "AppJuggler 1.9 | Version: 2611 | Build: ae57acf",
-        "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License",
-    ]
-
+        if isinstance(v, Cocoa.NSTextField)
+        and str(v.stringValue()) == "Jump straight to any app or window from your keyboard."
+    )
     links = [v for v in subviews if isinstance(v, _LinkButton)]
     assert [str(v.attributedTitle().string()) for v in links] == [
         "Source code: https://github.com/xsub/AppJuggler",
         "Native version: https://PuffyClouds.Works/AppJuggler2",
     ]
+
+    # One row under the subtitle, inside the header, left of the branding column.
+    header_floor = float(ctrl._window.contentView().frame().size.height) - 116.0
+    first, second = (v.frame() for v in links)
+    assert float(first.origin.y) == float(second.origin.y) > header_floor
+    assert Cocoa.NSMaxY(first) <= float(subtitle.frame().origin.y) + 4.0
+    assert Cocoa.NSMaxX(first) < float(second.origin.x)
+    assert Cocoa.NSMaxX(second) < float(puffy_card.frame().origin.x)
+
+    ctrl._set_version_details(True)
+    opened: list[str] = []
     for link in links:
+        link.configure(link._prefix, link._url, opened.append)
         link.performClick_(None)
     assert opened == [
         "https://github.com/xsub/AppJuggler",
         "https://PuffyClouds.Works/AppJuggler2",
     ]
-
-    # Rows stack top to bottom inside the pop-up without overlapping.
-    frames = sorted((v.frame() for v in subviews), key=lambda f: -float(f.origin.y))
-    for upper, lower in zip(frames, frames[1:]):
-        assert float(upper.origin.y) >= Cocoa.NSMaxY(lower)
-    assert all(Cocoa.NSMaxX(f) <= float(content.frame().size.width) for f in frames)

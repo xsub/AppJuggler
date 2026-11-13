@@ -95,7 +95,7 @@ open dist/AppJuggler.app
 - **Disable Window Animations…** *(button in `Edit Assignments…` & menu bar)*: opens a dedicated diagnostic & one-click helper window that disables programmable macOS AppKit window, Dock, Mission Control, and Finder animations (`defaults`), moves stuck Full Screen windows onto a single Desktop Space, and links directly to `System Settings → Accessibility → Display → Reduce motion`.
 - **Mouse Hover & Click in HUD** *(optional checkbox, disabled by default)*: when checked (or `"enable_mouse_selection": true` in `config.json`), you can also hover to highlight and click to select apps or windows directly in the HUD overlay (plus scroll wheel in multi-window lists and clicking the layer pill to toggle `Base` ↔ `Shift`). When unchecked, the HUD remains keyboard-only and completely click-through (`ignoresMouseEvents`).
 - Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux), and external edits to `config.json` are hot-reloaded automatically.
-- Click either logo in the window header to see the version, build and license, with links to the source code and to the native AppJuggler 2.
+- Click either logo in the window header to show the version and build next to the title, with links to the source code and to the native AppJuggler 2 under the subtitle; click again to hide them.
 
 ### 2. Optional: Hold `Caps Lock` (2s) Quick Assign *(Disabled by Default)*
 By default, AppJuggler only runs its lightweight `CGEventTap` double-Caps listener and does **not** attach an `IOHIDManager` hold monitor. If you want a 2-second physical `Caps Lock` hold to open an in-HUD open-apps quick-assign picker, opt in via either:
