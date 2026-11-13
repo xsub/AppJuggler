@@ -210,10 +210,10 @@ class NavigationController:
             ):
                 return StepResult(InputAction.SWALLOW)
 
-        # 2. AssignmentEditing never mixes with navigation mode.
+        # 2. AssignmentEditing passes all regular typing through to the editor window,
+        #    while still allowing double-Caps Lock (Caps×2) to summon the HUD navigator.
         if self._state is NavState.ASSIGNMENT_EDITING:
-            self._idle_caps_candidate_ns = None
-            return StepResult(InputAction.PASS_THROUGH)
+            return self._handle_idle_event_locked(event)
 
         # 3. IDLE mode: detect double-Caps Lock trigger; pass everything else through
         #    (except an immediate trailing chord digit right after a 1-window auto-jump).
@@ -626,6 +626,7 @@ class NavigationController:
                 cmds.extend(self._cancel_to_idle_locked("enter_assignment_editing"))
             self._state = NavState.ASSIGNMENT_EDITING
             self._idle_caps_candidate_ns = None
+            self._single_window_digit_guard_until_ns = 0
             return tuple(cmds)
 
         if isinstance(event, ExitAssignmentEditing):

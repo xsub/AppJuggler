@@ -24,6 +24,15 @@ KEY_GAP_X = 8.0
 KEY_GAP_Y = 8.0
 ROW_STAGGER: tuple[float, float, float] = (0.0, 26.0, 68.0)
 
+# Always-on-top modal HUD level & Space behavior (surfaces above Full Screen Spaces,
+# floating utility panels, and popups without NSWindowCollectionBehaviorStationary).
+HUD_WINDOW_LEVEL = int(Cocoa.NSScreenSaverWindowLevel) - 1
+HUD_COLLECTION_BEHAVIOR = (
+    Cocoa.NSWindowCollectionBehaviorCanJoinAllSpaces
+    | Cocoa.NSWindowCollectionBehaviorFullScreenAuxiliary
+    | Cocoa.NSWindowCollectionBehaviorIgnoresCycle
+)
+
 
 class KeyboardMapGridView(Cocoa.NSView):
     """Renders the 3-row ANSI QWERTY keyboard map; optionally clickable for slot editing."""
@@ -1019,13 +1028,8 @@ class MacOSOverlayPresenter(OverlayPresenter):
         panel.setHasShadow_(True)
         panel.setIgnoresMouseEvents_(not self._mouse_enabled)
         panel.setAcceptsMouseMovedEvents_(self._mouse_enabled)
-        panel.setLevel_(Cocoa.NSPopUpMenuWindowLevel)
-        panel.setCollectionBehavior_(
-            Cocoa.NSWindowCollectionBehaviorCanJoinAllSpaces
-            | Cocoa.NSWindowCollectionBehaviorFullScreenAuxiliary
-            | Cocoa.NSWindowCollectionBehaviorStationary
-            | Cocoa.NSWindowCollectionBehaviorIgnoresCycle
-        )
+        panel.setLevel_(HUD_WINDOW_LEVEL)
+        panel.setCollectionBehavior_(HUD_COLLECTION_BEHAVIOR)
 
         content = _HUDContentView.alloc().initWithFrame_(rect)
         content.icon_provider = self._app_registry.app_icon_for_bundle
@@ -1096,6 +1100,29 @@ class MacOSOverlayPresenter(OverlayPresenter):
         panel.setFrame_display_(Cocoa.NSMakeRect(x, y, width, height), True)
         content.setFrame_(Cocoa.NSMakeRect(0.0, 0.0, width, height))
 
+    @staticmethod
+    def _present_panel_front(panel: Cocoa.NSPanel) -> None:
+        panel.setCollectionBehavior_(HUD_COLLECTION_BEHAVIOR)
+        panel.setLevel_(HUD_WINDOW_LEVEL)
+        panel.orderFrontRegardless()
+
+    def is_interactive_visible(self) -> bool:
+        return bool(
+            self._panel is not None
+            and self._panel.isVisible()
+            and self._content is not None
+            and self._content.mode != "banner"
+        )
+
+    def contains_screen_point(self, pt: Cocoa.NSPoint) -> bool:
+        if self._panel is None or not self._panel.isVisible():
+            return False
+        return bool(Cocoa.NSPointInRect(pt, self._panel.frame()))
+
+    def reassert_frontmost(self) -> None:
+        if self._panel is not None and self._panel.isVisible():
+            self._present_panel_front(self._panel)
+
     def show_app_map(
         self,
         active_layer: Layer,
@@ -1131,7 +1158,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
             select_on_click=False,
         )
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
 
     def update_app_map_layer(self, active_layer: Layer) -> None:
         if self._panel is None or self._content is None:
@@ -1165,7 +1192,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         height = 64.0 + extra_notice + visible_rows * 46.0 + extra_footer
         self._resize_and_center(panel, content, 700.0, height)
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
 
     def update_quick_assign_app_selection(
         self,
@@ -1225,7 +1252,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
             select_on_click=False,
         )
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
 
     def show_launch_pending(self, binding: AppBinding) -> None:
         self._cancel_banner_timer()
@@ -1236,7 +1263,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         self._apply_mouse_mode_on_main(interactive_mode=False)
         self._resize_and_center(panel, content, 540.0, 86.0)
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
 
     def show_window_list(
         self,
@@ -1262,7 +1289,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         height = 66.0 + extra_notice + visible_rows * 46.0 + extra_footer
         self._resize_and_center(panel, content, 680.0, height)
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
 
     def update_window_selection(
         self,
@@ -1311,7 +1338,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         self._apply_mouse_mode_on_main(interactive_mode=False)
         self._resize_and_center(panel, content, 620.0, 66.0)
         content.setNeedsDisplay_(True)
-        panel.orderFrontRegardless()
+        self._present_panel_front(panel)
         self._schedule_banner_timer(auto_hide_ms, clear_notice_only=False)
 
     def hide(self) -> None:

@@ -78,6 +78,15 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
         self._cb = callbacks
         return self
 
+    def windowDidBecomeKey_(self, _notification) -> None:
+        self._cb["on_focus"]()
+
+    def windowDidResignKey_(self, _notification) -> None:
+        self._cb["on_blur"]()
+
+    def windowDidMiniaturize_(self, _notification) -> None:
+        self._cb["on_blur"]()
+
     def windowWillClose_(self, _notification) -> None:
         self._cb["on_close"]()
 
@@ -143,6 +152,7 @@ class AssignmentEditorController:
         self._window: Cocoa.NSWindow | None = None
         self._delegate: _AssignmentWindowDelegate | None = None
         self._grid_view: KeyboardMapGridView | None = None
+        self._editing_active: bool = False
 
         self._layer: Layer = Layer.BASE
         self._selected_key: str = "T"
@@ -163,14 +173,35 @@ class AssignmentEditorController:
         self._status_label = None
         self._repair_btn = None
 
+    def _mark_editing_active(self) -> None:
+        if not self._editing_active:
+            self._editing_active = True
+            self._on_enter_editing()
+
+    def _mark_editing_inactive(self) -> None:
+        if self._editing_active:
+            self._editing_active = False
+            self._on_exit_editing()
+
     def show_window(self) -> None:
-        self._on_enter_editing()
         if self._window is None:
             self._build_window()
         self.refresh_data()
         assert self._window is not None
+        self._window.setCollectionBehavior_(
+            Cocoa.NSWindowCollectionBehaviorMoveToActiveSpace
+            | Cocoa.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+        self._window.setLevel_(Cocoa.NSFloatingWindowLevel)
+        self._mark_editing_active()
         Cocoa.NSApp.activateIgnoringOtherApps_(True)
         self._window.makeKeyAndOrderFront_(None)
+
+    def close_if_open(self) -> None:
+        if self._window is not None and self._window.isVisible():
+            self._window.close()
+        else:
+            self._mark_editing_inactive()
 
     def is_visible(self) -> bool:
         return bool(self._window is not None and self._window.isVisible())
@@ -192,9 +223,17 @@ class AssignmentEditorController:
         )
         win.setTitle_("AppJuggler — Edit Assignments")
         win.setReleasedWhenClosed_(False)
+        win.setHidesOnDeactivate_(False)
+        win.setLevel_(Cocoa.NSFloatingWindowLevel)
+        win.setCollectionBehavior_(
+            Cocoa.NSWindowCollectionBehaviorMoveToActiveSpace
+            | Cocoa.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
 
         self._delegate = _AssignmentWindowDelegate.alloc().initWithCallbacks_(
             {
+                "on_focus": self._mark_editing_active,
+                "on_blur": self._mark_editing_inactive,
                 "on_close": self._handle_close,
                 "on_layer_changed": self._handle_layer_changed,
                 "on_filter_changed": self._handle_filter_changed,
@@ -820,7 +859,7 @@ class AssignmentEditorController:
         )
 
     def _handle_close(self) -> None:
-        self._on_exit_editing()
+        self._mark_editing_inactive()
 
     def _set_feedback(self, msg: str, is_error: bool) -> None:
         if self._status_label is None:

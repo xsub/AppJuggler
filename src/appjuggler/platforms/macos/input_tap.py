@@ -15,9 +15,11 @@ import objc
 import Quartz
 
 from appjuggler.contracts import InputAdapter
-from appjuggler.domain.events import HardwareKeyEvent, InputAction
+from appjuggler.domain.events import HardwareKeyEvent, InputAction, KeyKind
 from appjuggler.platforms.macos.keymap import (
     FLAG_ALPHA_SHIFT,
+    FLAG_SHIFT,
+    OTHER_MODIFIERS_MASK,
     VK_CAPS_LOCK,
     KeyEventDecoder,
 )
@@ -82,13 +84,15 @@ class MacOSInputAdapter(InputAdapter):
         self._on_caps_hold: Callable[[], None] | None = None
         self._layout_observer: _LayoutChangeObserver | None = None
 
-        # Optional physical Caps Lock 2-second hold state (disabled by default)
+        # Physical Caps Lock edge & optional 2-second hold state
         self._enable_caps_hold: bool = bool(enable_caps_hold)
         self._hold_lock = threading.Lock()
         self._hold_assign_sec: float = max(0.5, min(5.0, hold_assign_ms / 1000.0))
         self._caps_hold_seq: int = 0
         self._caps_hold_timer: threading.Timer | None = None
         self._caps_physically_down: bool = False
+        self._suppress_next_cg_caps_until_ns: int = 0
+        self._suppress_next_hid_caps_until_ns: int = 0
 
     @property
     def is_running(self) -> bool:
@@ -114,6 +118,9 @@ class MacOSInputAdapter(InputAdapter):
 
     def resync_modifier_state(self) -> None:
         self._cancel_caps_hold_timer()
+        with self._hold_lock:
+            self._suppress_next_cg_caps_until_ns = 0
+            self._suppress_next_hid_caps_until_ns = 0
         self._decoder.sync_caps_state(self._read_current_caps_lock())
 
     def refresh_keyboard_layout_on_main_thread(self) -> None:
@@ -168,11 +175,10 @@ class MacOSInputAdapter(InputAdapter):
                     ready_event.set()
                     return
 
-                hid_cleanup = (
-                    self._attach_iohid_caps_monitor()
-                    if (self._enable_caps_hold and self._on_caps_hold is not None)
-                    else None
-                )
+                # Attach raw HID Caps Lock listener unconditionally so fast (<75ms) Caps×2
+                # taps bypass Apple's ~80ms AlphaShift debounce delay; the 2s hold timer
+                # inside _on_physical_caps_key_change stays gated on _enable_caps_hold.
+                hid_cleanup = self._attach_iohid_caps_monitor()
 
                 with self._lock:
                     self._tap = tap
@@ -318,7 +324,10 @@ class MacOSInputAdapter(InputAdapter):
             iokit.IOHIDManagerScheduleWithRunLoop(mgr, raw_rl, common_modes)
             open_ret = iokit.IOHIDManagerOpen(mgr, 0)
             if open_ret != 0:
-                logger.warning("IOHIDManagerOpen returned %d; Caps 2s hold fallback via Tab in HUD remains available", open_ret)
+                logger.debug(
+                    "IOHIDManagerOpen returned %d; falling back to CGEventTap FlagsChanged for Caps Lock",
+                    open_ret,
+                )
                 iokit.IOHIDManagerUnscheduleFromRunLoop(mgr, raw_rl, common_modes)
                 cf.CFRelease(mgr)
                 return None
@@ -334,6 +343,10 @@ class MacOSInputAdapter(InputAdapter):
             return None
 
     def _on_physical_caps_key_change(self, is_down: bool) -> None:
+        now_ns = time.monotonic_ns()
+        emit_event: HardwareKeyEvent | None = None
+        on_event = self._on_event
+
         with self._hold_lock:
             if is_down:
                 if self._caps_physically_down:
@@ -341,22 +354,56 @@ class MacOSInputAdapter(InputAdapter):
                 self._caps_physically_down = True
                 if self._caps_hold_timer is not None:
                     self._caps_hold_timer.cancel()
-                self._caps_hold_seq += 1
-                seq = self._caps_hold_seq
-                timer = threading.Timer(
-                    self._hold_assign_sec,
-                    self._fire_caps_hold_if_still_down,
-                    args=(seq,),
-                )
-                timer.daemon = True
-                self._caps_hold_timer = timer
-                timer.start()
+                    self._caps_hold_timer = None
+                if self._enable_caps_hold and self._on_caps_hold is not None:
+                    self._caps_hold_seq += 1
+                    seq = self._caps_hold_seq
+                    timer = threading.Timer(
+                        self._hold_assign_sec,
+                        self._fire_caps_hold_if_still_down,
+                        args=(seq,),
+                    )
+                    timer.daemon = True
+                    self._caps_hold_timer = timer
+                    timer.start()
+
+                if now_ns <= self._suppress_next_hid_caps_until_ns:
+                    self._suppress_next_hid_caps_until_ns = 0
+                else:
+                    self._suppress_next_cg_caps_until_ns = now_ns + 350_000_000
+                    flags = int(
+                        Quartz.CGEventSourceFlagsState(
+                            Quartz.kCGEventSourceStateCombinedSessionState
+                        )
+                    )
+                    emit_event = HardwareKeyEvent(
+                        kind=KeyKind.CAPS_LOCK,
+                        keycode=VK_CAPS_LOCK,
+                        timestamp_ns=now_ns,
+                        is_key_down=True,
+                        symbol=None,
+                        shift_held=bool(flags & FLAG_SHIFT),
+                        caps_lock_on=bool(flags & FLAG_ALPHA_SHIFT),
+                        other_modifiers_held=bool(flags & OTHER_MODIFIERS_MASK),
+                        caps_lock_toggled=True,
+                    )
             else:
                 self._caps_physically_down = False
                 self._caps_hold_seq += 1
                 if self._caps_hold_timer is not None:
                     self._caps_hold_timer.cancel()
                     self._caps_hold_timer = None
+                if self._suppress_next_cg_caps_until_ns > 0:
+                    self._suppress_next_cg_caps_until_ns = min(
+                        self._suppress_next_cg_caps_until_ns,
+                        now_ns + 25_000_000,
+                    )
+
+        if emit_event is not None and on_event is not None:
+            try:
+                on_event(emit_event)
+            except Exception:
+                logger.exception("Error dispatching physical Caps Lock key-down event")
 
     def _cancel_caps_hold_timer(self) -> None:
         with self._hold_lock:
@@ -443,11 +490,23 @@ class MacOSInputAdapter(InputAdapter):
                 self._cancel_caps_hold_timer()
 
             if event_type == Quartz.kCGEventFlagsChanged:
+                if keycode == VK_CAPS_LOCK:
+                    with self._hold_lock:
+                        if (
+                            self._caps_physically_down
+                            or now_ns <= self._suppress_next_cg_caps_until_ns
+                        ):
+                            self._suppress_next_cg_caps_until_ns = 0
+                            self._decoder.sync_caps_state(bool(flags & FLAG_ALPHA_SHIFT))
+                            return event
                 hw_event = self._decoder.decode_flags_changed(
                     keycode=keycode,
                     flags=flags,
                     timestamp_ns=now_ns,
                 )
+                if keycode == VK_CAPS_LOCK and hw_event.caps_lock_toggled:
+                    with self._hold_lock:
+                        self._suppress_next_hid_caps_until_ns = now_ns + 35_000_000
             elif event_type in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
                 is_down = event_type == Quartz.kCGEventKeyDown
                 is_repeat = bool(

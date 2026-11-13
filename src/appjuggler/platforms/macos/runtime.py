@@ -209,6 +209,8 @@ class MacOSAppRuntime:
         self._duplicate_conflicts: frozenset[str] = frozenset()
         self._power_observer: _PowerAndLockObserver | None = None
         self._pulse_timer = None
+        self._global_mouse_monitor = None
+        self._last_modal_show_mono: float = 0.0
         self._shutting_down: bool = False
         self._signal_shutdown_requested: bool = False
         self._sig_pipe_r: int | None = None
@@ -227,6 +229,7 @@ class MacOSAppRuntime:
         self._refresh_running_apps_snapshot()
         self._refresh_duplicate_conflicts_async()
         self._register_power_and_lock_observers()
+        self._install_outside_click_monitor()
         self._install_unix_signal_handlers()
 
         status = self._ensure_input_tap_state()
@@ -273,6 +276,7 @@ class MacOSAppRuntime:
             self._pulse_timer.invalidate()
             self._pulse_timer = None
         self._teardown_unix_signal_handlers()
+        self._teardown_outside_click_monitor()
         self._unregister_power_and_lock_observers()
         self._input_adapter.stop()
         self._app_registry.stop_observing()
@@ -294,6 +298,43 @@ class MacOSAppRuntime:
         )
         if wake_ev is not None:
             Cocoa.NSApp.postEvent_atStart_(wake_ev, True)
+
+    def _install_outside_click_monitor(self) -> None:
+        """Dismiss open modal HUD back to IDLE when the user clicks into another app."""
+        if self._global_mouse_monitor is not None:
+            return
+        try:
+            mask = (
+                Cocoa.NSEventMaskLeftMouseDown
+                | Cocoa.NSEventMaskRightMouseDown
+                | Cocoa.NSEventMaskOtherMouseDown
+            )
+            self._global_mouse_monitor = (
+                Cocoa.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                    mask,
+                    self._on_global_mouse_down,
+                )
+            )
+        except Exception:
+            logger.debug("Could not install global outside-click monitor", exc_info=True)
+
+    def _teardown_outside_click_monitor(self) -> None:
+        if self._global_mouse_monitor is not None:
+            try:
+                Cocoa.NSEvent.removeMonitor_(self._global_mouse_monitor)
+            except Exception:
+                pass
+            self._global_mouse_monitor = None
+
+    def _on_global_mouse_down(self, _event) -> None:
+        if self._controller.state in (NavState.IDLE, NavState.ASSIGNMENT_EDITING):
+            return
+        if self._controller.is_waiting_on_backend:
+            return
+        if not self._overlay.is_interactive_visible():
+            return
+        if not self._overlay.contains_screen_point(Cocoa.NSEvent.mouseLocation()):
+            self._post_backend_event(SystemInterruptEvent(reason="outside_click"))
 
     def _install_unix_signal_handlers(self) -> None:
         """Hook SIGINT/SIGTERM via wakeup fd so Ctrl+C exits cleanly without OC_PythonException."""
@@ -462,7 +503,9 @@ class MacOSAppRuntime:
 
     def _execute_ui_command_on_main(self, cmd: NavCommand) -> None:
         if isinstance(cmd, ShowAppMapCommand):
+            self._assignment_editor.close_if_open()
             self._active_window_list_bundle = None
+            self._last_modal_show_mono = time.monotonic()
             if self._store.reload_if_modified():
                 self._sync_config_to_controller()
             self._overlay.set_mouse_enabled(self._store.enable_mouse_selection)
@@ -479,6 +522,7 @@ class MacOSAppRuntime:
             self._overlay.update_app_map_layer(cmd.active_layer)
         elif isinstance(cmd, ShowQuickAssignAppListCommand):
             self._active_window_list_bundle = None
+            self._last_modal_show_mono = time.monotonic()
             self._overlay.show_quick_assign_apps(
                 apps=cmd.apps,
                 selected_index=cmd.selected_index,
@@ -492,6 +536,7 @@ class MacOSAppRuntime:
             )
         elif isinstance(cmd, ShowQuickAssignKeyMapCommand):
             self._active_window_list_bundle = None
+            self._last_modal_show_mono = time.monotonic()
             running = self._app_registry.running_bundle_ids()
             self._overlay.show_quick_assign_keymap(
                 app=cmd.app,
@@ -503,6 +548,7 @@ class MacOSAppRuntime:
             )
         elif isinstance(cmd, ShowWindowListCommand):
             self._active_window_list_bundle = cmd.binding.bundle_id
+            self._last_modal_show_mono = time.monotonic()
             self._overlay.set_mouse_enabled(self._store.enable_mouse_selection)
             self._overlay.show_window_list(
                 binding=cmd.binding,
@@ -921,13 +967,7 @@ class MacOSAppRuntime:
         self._controller.set_mouse_selection_enabled(mouse_enabled)
         self._main.dispatch(lambda enabled=mouse_enabled: self._overlay.set_mouse_enabled(enabled))
         self._input_adapter.set_hold_assign_ms(trig.hold_assign_ms)
-        if trig.enable_caps_hold_assign != self._input_adapter.caps_hold_enabled:
-            was_running = self._input_adapter.is_running
-            if was_running:
-                self._input_adapter.stop()
-            self._input_adapter.set_caps_hold_enabled(trig.enable_caps_hold_assign)
-            if was_running:
-                self._ensure_input_tap_state()
+        self._input_adapter.set_caps_hold_enabled(trig.enable_caps_hold_assign)
         self._controller.update_bindings(self._store.bindings)
         self._refresh_duplicate_conflicts_async()
         self._update_status_bar_summary()
@@ -953,8 +993,8 @@ class MacOSAppRuntime:
         if not status.is_ready:
             self._status_bar.show_permissions_dialog(prompt_system=True)
             return
-        if self._controller.state is NavState.IDLE:
-            t = 1_000_000_000
+        if self._controller.state in (NavState.IDLE, NavState.ASSIGNMENT_EDITING):
+            t = time.monotonic_ns()
             ev1 = HardwareKeyEvent(
                 kind=self._caps_kind(),
                 keycode=57,
@@ -987,15 +1027,10 @@ class MacOSAppRuntime:
             return status
 
         if status.accessibility_trusted and not self._input_adapter.is_running:
-            hold_cb = (
-                self._on_caps_hold_triggered
-                if self._store.trigger.enable_caps_hold_assign
-                else None
-            )
             started = self._input_adapter.start(
                 on_event=self._on_hardware_key,
                 on_interrupt=self._on_tap_interrupt,
-                on_caps_hold=hold_cb,
+                on_caps_hold=self._on_caps_hold_triggered,
             )
             if started:
                 status = self._permission_monitor.check_status(prompt=False)
@@ -1066,8 +1101,37 @@ class MacOSAppRuntime:
         self._refresh_running_apps_snapshot()
         self._ensure_input_tap_state()
 
+    def _on_active_space_changed(self) -> None:
+        self._window_activator.note_space_change()
+        if (
+            self._controller.state
+            in (
+                NavState.APP_SELECTION,
+                NavState.WINDOW_SELECTION,
+                NavState.QUICK_ASSIGN_APP,
+                NavState.QUICK_ASSIGN_KEY,
+            )
+            and self._overlay.is_interactive_visible()
+        ):
+            self._overlay.reassert_frontmost()
+
     def _on_health_pulse(self) -> None:
         self._recover_if_backend_stalled()
+        if (
+            self._controller.state
+            in (
+                NavState.APP_SELECTION,
+                NavState.WINDOW_SELECTION,
+                NavState.QUICK_ASSIGN_APP,
+                NavState.QUICK_ASSIGN_KEY,
+            )
+            and not self._controller.is_waiting_on_backend
+            and (time.monotonic() - self._last_modal_show_mono) > 0.5
+            and not self._overlay.is_interactive_visible()
+        ):
+            self._post_backend_event(
+                SystemInterruptEvent(reason="overlay_hidden_resync")
+            )
         if (
             self._controller.state is not NavState.ASSIGNMENT_EDITING
             and self._store.reload_if_modified()
@@ -1087,7 +1151,7 @@ class MacOSAppRuntime:
                 "on_sleep": self._on_sleep_or_lock,
                 "on_wake": self._on_wake_or_unlock,
                 "on_lock": self._on_sleep_or_lock,
-                "on_space_change": self._window_activator.note_space_change,
+                "on_space_change": self._on_active_space_changed,
                 "on_signal_wake": self._on_signal_pipe_wake,
                 "on_pulse": self._on_health_pulse,
             }

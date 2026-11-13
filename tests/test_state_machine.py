@@ -433,24 +433,27 @@ def test_closed_app_launch_pending_cancellation_and_missing_bundle() -> None:
 
 
 def test_assignment_editing_and_system_interrupt_isolation() -> None:
-    ctrl = NavigationController(trigger_interval_ms=300)
+    ctrl = NavigationController(trigger_interval_ms=300, enable_caps_hold_assign=True)
     ctrl.handle_backend_event(EnterAssignmentEditing())
     assert ctrl.state is NavState.ASSIGNMENT_EDITING
 
-    # Double-Caps during AssignmentEditing does NOT open HUD navigator
-    ctrl.handle_key_event(_caps_event(100, caps_on=True))
-    res = ctrl.handle_key_event(_caps_event(200, caps_on=False))
-    assert res.commands == ()
+    # Normal typing and 2s Caps-hold are ignored/passed through while Edit Assignments is focused
+    assert ctrl.handle_key_event(_digit_event("3", 50)).action is InputAction.PASS_THROUGH
+    assert ctrl.handle_backend_event(CapsHoldTriggered()) == ()
     assert ctrl.state is NavState.ASSIGNMENT_EDITING
 
-    ctrl.handle_backend_event(ExitAssignmentEditing())
-    assert ctrl.state is NavState.IDLE
-
-    # System interrupt (e.g. screen lock) cancels active modal panel immediately
-    ctrl.handle_key_event(_caps_event(400, caps_on=True))
-    ctrl.handle_key_event(_caps_event(500, caps_on=False))
+    # Double-Caps ALWAYS summons the HUD navigator even if Edit Assignments was left open,
+    # and asynchronous ExitAssignmentEditing from closing the editor does not clobber APP_SELECTION!
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    res = ctrl.handle_key_event(_caps_event(200, caps_on=False))
     assert ctrl.state is NavState.APP_SELECTION
-    int_cmds = ctrl.handle_backend_event(SystemInterruptEvent(reason="screen_locked"))
+    assert isinstance(res.commands[0], ShowAppMapCommand)
+
+    assert ctrl.handle_backend_event(ExitAssignmentEditing()) == ()
+    assert ctrl.state is NavState.APP_SELECTION
+
+    # System interrupt (e.g. outside click or screen lock) cancels active modal panel immediately
+    int_cmds = ctrl.handle_backend_event(SystemInterruptEvent(reason="outside_click"))
     assert ctrl.state is NavState.IDLE
     assert isinstance(int_cmds[0], HideOverlayCommand)
 
