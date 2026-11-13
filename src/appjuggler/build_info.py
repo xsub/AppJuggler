@@ -35,8 +35,13 @@ class BuildInfo:
 UNKNOWN = BuildInfo(version="dev", build="unknown")
 
 
+def version_and_build(info: BuildInfo) -> str:
+    """Shown after the title in Edit Assignments when a logo is clicked."""
+    return f"Version: {info.version} | Build: {info.build}"
+
+
 def version_line(info: BuildInfo) -> str:
-    return f"{PRODUCT_NAME} | Version: {info.version} | Build: {info.build}"
+    return f"{PRODUCT_NAME} | {version_and_build(info)}"
 
 
 def console_banner(info: BuildInfo) -> str:
