@@ -1,7 +1,18 @@
 """py2app packaging configuration for building standalone AppJuggler.app on macOS."""
 
+import sys
+from pathlib import Path
+
 from py2app.build_app import py2app as _py2app
 from setuptools import setup
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from appjuggler.build_info import BUILD_COMMIT_KEY, UNKNOWN, git_build_info  # noqa: E402
+
+# Stamp the bundle with the calendar version ("2611" = November 2026) and the commit it is
+# built from; the app shows both (see appjuggler.build_info).
+BUILD = git_build_info(Path(__file__).resolve().parent) or UNKNOWN
+print(f"==> Version {BUILD.version}, build {BUILD.build}")
 
 
 class CleanPy2App(_py2app):
@@ -24,8 +35,9 @@ OPTIONS = {
         "CFBundleName": "AppJuggler",
         "CFBundleDisplayName": "AppJuggler",
         "CFBundleIdentifier": "io.appjuggler.AppJuggler",
-        "CFBundleVersion": "0.1.0",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleVersion": BUILD.version,
+        "CFBundleShortVersionString": BUILD.version,
+        BUILD_COMMIT_KEY: BUILD.build,
         "LSMinimumSystemVersion": "13.0",
         # LSUIElement=True makes AppJuggler a clean menu-bar agent without a Dock tile
         "LSUIElement": True,

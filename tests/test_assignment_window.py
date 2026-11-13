@@ -13,12 +13,15 @@ from appjuggler import CONTACT_EMAIL
 from appjuggler.contracts import ApplicationRegistry
 from appjuggler.domain.models import AppRecord
 from appjuggler.persistence.binding_store import BindingStore
+from appjuggler.build_info import BuildInfo
 from appjuggler.platforms.macos.ui.assignment_window import (
     AssignmentEditorController,
     _CopyableAddressButton,
     _FullWidthCaptionView,
     _HighQualityImageView,
+    _LinkButton,
     _RoundedCardView,
+    _about_popover_content,
 )
 
 
@@ -404,3 +407,74 @@ def test_per_slot_show_window_picker_checkbox_persists_and_updates_summary(
     slot_t2 = ctrl._store.get_slot("T", Layer.BASE)
     assert slot_t2 is not None and slot_t2.show_window_picker is True
     assert "[~ Direct Jump]" not in str(ctrl._slot_summary_label.stringValue())
+
+
+class _RecordingPopover:
+    def __init__(self) -> None:
+        self.shown_below: list[object] = []
+
+    def toggle_below(self, view) -> None:
+        self.shown_below.append(view)
+
+    def close(self) -> None:
+        pass
+
+
+def test_clicking_either_logo_opens_the_version_popup_below_it(tmp_path: Path) -> None:
+    ctrl = _make_controller(tmp_path)
+    subviews = _content_subviews(ctrl)
+    app_icon = next(v for v in subviews if isinstance(v, _HighQualityImageView))
+    puffy_card = next(
+        v for v in subviews if isinstance(v, _RoundedCardView) and v._logo_image is not None
+    )
+    keyboard_map_card = next(
+        v for v in subviews if isinstance(v, _RoundedCardView) and v._logo_image is None
+    )
+    recorder = _RecordingPopover()
+    ctrl._about_popover = recorder
+
+    app_icon.mouseDown_(None)
+    assert puffy_card.accessibilityPerformPress()
+    assert recorder.shown_below == [app_icon, puffy_card]
+
+    # Both logos read as buttons to VoiceOver; the keyboard map card stays a plain view.
+    for logo in (app_icon, puffy_card):
+        assert logo.isAccessibilityElement()
+        assert str(logo.accessibilityRole()) == str(Cocoa.NSAccessibilityButtonRole)
+        assert str(logo.accessibilityLabel()) == "Version information"
+    assert keyboard_map_card._on_click is None
+    assert not keyboard_map_card.accessibilityPerformPress()
+
+
+def test_version_popup_shows_version_build_license_and_links() -> None:
+    opened: list[str] = []
+    content = _about_popover_content(BuildInfo(version="2611", build="ae57acf"), opened.append)
+    subviews = list(content.subviews())
+
+    labels = [
+        str(v.stringValue())
+        for v in subviews
+        if isinstance(v, Cocoa.NSTextField) and not isinstance(v, Cocoa.NSButton)
+    ]
+    assert labels == [
+        "AppJuggler 1 | Version: 2611 | Build: ae57acf",
+        "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License",
+    ]
+
+    links = [v for v in subviews if isinstance(v, _LinkButton)]
+    assert [str(v.attributedTitle().string()) for v in links] == [
+        "Source code: https://github.com/xsub/AppJuggler",
+        "Native version: https://PuffyClouds.Works/AppJuggler2",
+    ]
+    for link in links:
+        link.performClick_(None)
+    assert opened == [
+        "https://github.com/xsub/AppJuggler",
+        "https://PuffyClouds.Works/AppJuggler2",
+    ]
+
+    # Rows stack top to bottom inside the pop-up without overlapping.
+    frames = sorted((v.frame() for v in subviews), key=lambda f: -float(f.origin.y))
+    for upper, lower in zip(frames, frames[1:]):
+        assert float(upper.origin.y) >= Cocoa.NSMaxY(lower)
+    assert all(Cocoa.NSMaxX(f) <= float(content.frame().size.width) for f in frames)
