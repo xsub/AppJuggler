@@ -2,7 +2,7 @@
   <img src="src/appjuggler/assets/app_icon.png" width="136" alt="AppJuggler Icon" />
 </p>
 
-# AppJuggler
+# AppJuggler 1.9
 
 > **Jump straight to any app or window from your keyboard.**
 
@@ -75,7 +75,7 @@ open dist/AppJuggler.app
 ```
 
 - Produces an ad-hoc signed menu-bar bundle (`LSUIElement=true`, `CFBundleIdentifier=io.appjuggler.AppJuggler`) at `dist/AppJuggler.app`.
-- The bundle is stamped with its version and build. AppJuggler uses calendar versions: `2611` means it was built from a commit dated November 2026, and the build is that commit's short hash (`-dirty` when tracked files had uncommitted changes). Run from a source checkout, AppJuggler reads both from git. `appjuggler --version` prints them, and the app logs them first thing at startup: `AppJuggler 1 | Version: 2611 | Build: ae57acf | (c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License`.
+- The bundle is stamped with its version and build. AppJuggler uses calendar versions: `2611` means it was built from a commit dated November 2026, and the build is that commit's short hash (`-dirty` when tracked files had uncommitted changes). Run from a source checkout, AppJuggler reads both from git. `appjuggler --version` prints them, and the app logs them first thing at startup: `AppJuggler 1.9 | Version: 2611 | Build: ae57acf | (c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License`.
 - Grant **AppJuggler.app** access in **System Settings → Privacy & Security → Accessibility**. (If you rebuild `AppJuggler.app` later, macOS TCC may require toggling its Accessibility switch OFF and back ON.)
 
 ---

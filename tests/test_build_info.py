@@ -1,4 +1,4 @@
-"""Unit tests for the AppJuggler 1 version and build information."""
+"""Unit tests for the AppJuggler 1.9 version and build information."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ from appjuggler.build_info import BuildInfo
 
 def test_console_banner_introduces_product_version_build_and_license() -> None:
     info = BuildInfo(version="2611", build="ae57acf")
-    assert build_info.version_line(info) == "AppJuggler 1 | Version: 2611 | Build: ae57acf"
+    assert build_info.version_line(info) == "AppJuggler 1.9 | Version: 2611 | Build: ae57acf"
     assert build_info.console_banner(info) == (
-        "AppJuggler 1 | Version: 2611 | Build: ae57acf"
+        "AppJuggler 1.9 | Version: 2611 | Build: ae57acf"
         " | (c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License"
     )
 

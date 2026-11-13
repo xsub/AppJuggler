@@ -883,9 +883,13 @@ class AssignmentEditorController:
         self._show_version_on_click(app_logo_view)
         content.addSubview_(app_logo_view)
 
-        title_lbl = Cocoa.NSTextField.labelWithString_("AppJuggler")
-        title_lbl.setFont_(theme.font_ui(24.0, bold=True))
-        title_lbl.setTextColor_(Cocoa.NSColor.labelColor())
+        title_lbl = Cocoa.NSTextField.labelWithAttributedString_(
+            theme.product_title(
+                theme.font_ui(24.0, bold=True),
+                Cocoa.NSColor.labelColor(),
+                Cocoa.NSColor.secondaryLabelColor(),
+            )
+        )
         title_lbl.setFrame_(
             Cocoa.NSMakeRect(104.0, hdr_sep_y + 55.0, col_x - 120.0, 30.0)
         )

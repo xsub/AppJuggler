@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import Cocoa
@@ -434,15 +435,18 @@ class _HUDContentView(Cocoa.NSView):
 
     @objc.python_method
     def _draw_map_chrome(self, bounds: Cocoa.NSRect) -> None:
-        theme.draw_text(
-            "AppJuggler",
-            Cocoa.NSMakeRect(22.0, 14.0, 110.0, 22.0),
-            theme.font_ui(15.0, bold=True),
-            theme.TEXT_PRIMARY,
+        # "AppJuggler 1.9" with the number greyed; the pills follow the title at a fixed gap.
+        title = theme.product_title(
+            theme.font_ui(15.0, bold=True), theme.TEXT_PRIMARY, theme.TEXT_SECONDARY
         )
+        title_w = float(title.size().width)
+        title.drawInRect_(Cocoa.NSMakeRect(22.0, 14.0, title_w + 1.0, 22.0))
+        pill_x = float(math.ceil(22.0 + title_w + 25.0))
+        dj_x = pill_x + 170.0
+        hint_x = dj_x + 146.0
 
         is_shift = self.active_layer is Layer.SHIFT
-        pill_rect = Cocoa.NSMakeRect(130.0, 13.0, 162.0, 22.0)
+        pill_rect = Cocoa.NSMakeRect(pill_x, 13.0, 162.0, 22.0)
         self._layer_pill_rect = pill_rect
         pill_bg = (
             theme.rgba(245, 166, 35, 0.22)
@@ -453,13 +457,13 @@ class _HUDContentView(Cocoa.NSView):
         theme.fill_round_rect(pill_rect, 11.0, pill_bg, pill_border, 1.0)
         theme.draw_text(
             "SHIFT LAYER · ⇧A–Z" if is_shift else "BASE LAYER · A–Z",
-            Cocoa.NSMakeRect(135.0, 16.0, 152.0, 16.0),
+            Cocoa.NSMakeRect(pill_x + 5.0, 16.0, 152.0, 16.0),
             theme.font_mono(11.0, bold=True),
             pill_border,
             align=Cocoa.NSTextAlignmentCenter,
         )
 
-        dj_rect = Cocoa.NSMakeRect(300.0, 13.0, 138.0, 22.0)
+        dj_rect = Cocoa.NSMakeRect(dj_x, 13.0, 138.0, 22.0)
         self._direct_jump_pill_rect = dj_rect
         if self.direct_jump_active:
             dj_bg = theme.rgba(52, 211, 153, 0.24)
@@ -474,7 +478,7 @@ class _HUDContentView(Cocoa.NSView):
         theme.fill_round_rect(dj_rect, 11.0, dj_bg, dj_border, 1.0)
         theme.draw_text(
             dj_text,
-            Cocoa.NSMakeRect(305.0, 16.0, 128.0, 16.0),
+            Cocoa.NSMakeRect(dj_x + 5.0, 16.0, 128.0, 16.0),
             theme.font_mono(10.5, bold=True),
             dj_fg,
             align=Cocoa.NSTextAlignmentCenter,
@@ -490,7 +494,7 @@ class _HUDContentView(Cocoa.NSView):
         header_hint = "  ·  ".join(hint_parts)
         theme.draw_text(
             header_hint,
-            Cocoa.NSMakeRect(446.0, 16.0, bounds.size.width - 468.0, 18.0),
+            Cocoa.NSMakeRect(hint_x, 16.0, bounds.size.width - hint_x - 22.0, 18.0),
             theme.font_ui(11.5, bold=False),
             theme.TEXT_SECONDARY,
             align=Cocoa.NSTextAlignmentRight,
