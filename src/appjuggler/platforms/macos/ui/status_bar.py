@@ -70,6 +70,8 @@ class StatusBarController:
         self._unassigned_menu_item = None
         self._auto_fs_menu_item = None
         self._mouse_sel_menu_item = None
+        self._last_rendered_snapshot: tuple[bool, bool, int, bool, bool] | None = None
+        self._last_icon_ready: bool | None = None
 
     def install(self) -> None:
         bar = Cocoa.NSStatusBar.systemStatusBar()
@@ -172,8 +174,20 @@ class StatusBarController:
     ) -> None:
         if self._status_item is None:
             return
+        snap = (
+            bool(perm_status.is_ready),
+            bool(perm_status.screen_locked),
+            int(unassigned_count),
+            bool(auto_fullscreen),
+            bool(mouse_selection),
+        )
+        if snap == self._last_rendered_snapshot:
+            return
+        self._last_rendered_snapshot = snap
+
         btn = self._status_item.button()
-        if btn is not None:
+        if btn is not None and self._last_icon_ready != perm_status.is_ready:
+            self._last_icon_ready = perm_status.is_ready
             self._apply_button_icon(btn, ready=perm_status.is_ready)
 
         if self._auto_fs_menu_item is not None:

@@ -20,44 +20,44 @@ logger = logging.getLogger(__name__)
 
 
 class _WorkspaceObserver(Cocoa.NSObject):
-    """Objective-C notification receiver for NSWorkspace app lifecycle events."""
+    """Objective-C notification receiver for NSWorkspace Regular-app launch/terminate events."""
 
     def initWithCallbacks_(
         self,
         callbacks: tuple[
-            Callable[[str | None, int], None],
-            Callable[[str | None, int], None],
-            Callable[[str | None, int], None],
+            Callable[[str | None, int, bool], None],
+            Callable[[str | None, int, bool], None],
         ],
     ):
         self = objc.super(_WorkspaceObserver, self).init()
         if self is None:
             return None
-        self._on_launch, self._on_terminate, self._on_activate = callbacks
+        self._on_launch, self._on_terminate = callbacks
         return self
 
     def appDidLaunch_(self, notification) -> None:
-        bid, pid = self._extract(notification)
-        self._on_launch(bid, pid)
+        bid, pid, is_regular = self._extract(notification)
+        if pid > 0:
+            self._on_launch(bid, pid, is_regular)
 
     def appDidTerminate_(self, notification) -> None:
-        bid, pid = self._extract(notification)
-        self._on_terminate(bid, pid)
-
-    def appDidActivate_(self, notification) -> None:
-        bid, pid = self._extract(notification)
-        self._on_activate(bid, pid)
+        bid, pid, is_regular = self._extract(notification)
+        if pid > 0:
+            self._on_terminate(bid, pid, is_regular)
 
     @staticmethod
-    def _extract(notification) -> tuple[str | None, int]:
+    def _extract(notification) -> tuple[str | None, int, bool]:
         info = notification.userInfo() if notification is not None else None
         app = info.get(Cocoa.NSWorkspaceApplicationKey) if info is not None else None
         if app is None:
-            return None, 0
+            return None, 0, False
         raw_bid = app.bundleIdentifier()
         bid = str(raw_bid) if raw_bid else None
         pid = int(app.processIdentifier())
-        return bid, pid
+        is_regular = (
+            app.activationPolicy() == Cocoa.NSApplicationActivationPolicyRegular
+        )
+        return bid, pid, is_regular
 
 
 class MacOSApplicationRegistry(ApplicationRegistry):
@@ -68,6 +68,8 @@ class MacOSApplicationRegistry(ApplicationRegistry):
         self._observer: _WorkspaceObserver | None = None
         self._lifecycle_listeners: list[Callable[[str, str | None, int], None]] = []
         self._icon_cache: dict[str, object] = {}
+        self._bundle_url_cache: dict[tuple[str, str | None], tuple[str, ...]] = {}
+        self._known_regular_pids: set[int] = set()
         self._launch_signal = threading.Condition()
 
     def start_observing(
@@ -81,9 +83,8 @@ class MacOSApplicationRegistry(ApplicationRegistry):
 
             obs = _WorkspaceObserver.alloc().initWithCallbacks_(
                 (
-                    lambda bid, pid: self._emit("launch", bid, pid),
-                    lambda bid, pid: self._emit("terminate", bid, pid),
-                    lambda bid, pid: self._emit("activate", bid, pid),
+                    lambda bid, pid, reg: self._emit("launch", bid, pid, reg),
+                    lambda bid, pid, reg: self._emit("terminate", bid, pid, reg),
                 )
             )
             nc = Cocoa.NSWorkspace.sharedWorkspace().notificationCenter()
@@ -99,12 +100,6 @@ class MacOSApplicationRegistry(ApplicationRegistry):
                 Cocoa.NSWorkspaceDidTerminateApplicationNotification,
                 None,
             )
-            nc.addObserver_selector_name_object_(
-                obs,
-                "appDidActivate:",
-                Cocoa.NSWorkspaceDidActivateApplicationNotification,
-                None,
-            )
             self._observer = obs
 
     def stop_observing(self) -> None:
@@ -117,11 +112,30 @@ class MacOSApplicationRegistry(ApplicationRegistry):
             except Exception:
                 pass
 
-    def _emit(self, kind: str, bundle_id: str | None, pid: int) -> None:
+    def _emit(
+        self, kind: str, bundle_id: str | None, pid: int, is_regular: bool
+    ) -> None:
         with self._launch_signal:
             self._launch_signal.notify_all()
+
+        # Ignore background/headless helper processes (e.g. CLI tools, Python scripts, XPC agents)
+        # so rapid background process churn never stalls the main AppKit runloop.
         with self._lock:
+            if kind == "launch":
+                if not is_regular:
+                    return
+                self._known_regular_pids.add(pid)
+            elif kind == "terminate":
+                was_known = pid in self._known_regular_pids
+                self._known_regular_pids.discard(pid)
+                if not is_regular and not was_known:
+                    return
+            if bundle_id:
+                self._bundle_url_cache = {
+                    k: v for k, v in self._bundle_url_cache.items() if k[0] != bundle_id
+                }
             listeners = list(self._lifecycle_listeners)
+
         for cb in listeners:
             try:
                 cb(kind, bundle_id, pid)
@@ -202,14 +216,21 @@ class MacOSApplicationRegistry(ApplicationRegistry):
         ws = Cocoa.NSWorkspace.sharedWorkspace()
         own_pid = os.getpid()
         result: set[str] = set()
+        regular_pids: set[int] = set()
         for app in ws.runningApplications():
-            if app.isTerminated() or int(app.processIdentifier()) == own_pid:
+            if app.isTerminated():
+                continue
+            pid = int(app.processIdentifier())
+            if pid == own_pid:
                 continue
             if app.activationPolicy() != Cocoa.NSApplicationActivationPolicyRegular:
                 continue
+            regular_pids.add(pid)
             bid = app.bundleIdentifier()
             if bid and str(bid) != APP_BUNDLE_ID:
                 result.add(str(bid))
+        with self._lock:
+            self._known_regular_pids = regular_pids
         return frozenset(result)
 
     def is_bundle_running(self, bundle_id: str) -> bool:
@@ -218,7 +239,13 @@ class MacOSApplicationRegistry(ApplicationRegistry):
     def resolve_bundle_urls(
         self, bundle_id: str, hint_path: str | None = None
     ) -> tuple[str, ...]:
-        """Return all installed .app bundle paths registered for `bundle_id`."""
+        """Return all installed .app bundle paths registered for `bundle_id` (cached)."""
+        cache_key = (bundle_id, hint_path)
+        with self._lock:
+            cached = self._bundle_url_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         ws = Cocoa.NSWorkspace.sharedWorkspace()
         paths: list[str] = []
 
@@ -240,7 +267,10 @@ class MacOSApplicationRegistry(ApplicationRegistry):
                 if resolved not in paths and Path(resolved).exists():
                     paths.append(resolved)
 
-        return tuple(paths)
+        resolved_tuple = tuple(paths)
+        with self._lock:
+            self._bundle_url_cache[cache_key] = resolved_tuple
+        return resolved_tuple
 
     def installed_apps(self) -> tuple[AppRecord, ...]:
         """Scan standard macOS Application directories and merge with running apps."""

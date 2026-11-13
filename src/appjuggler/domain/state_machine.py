@@ -137,6 +137,19 @@ class NavigationController:
         with self._lock:
             return self._window_generation
 
+    @property
+    def is_waiting_on_backend(self) -> bool:
+        """True when modal capture is waiting on an asynchronous worker completion."""
+        with self._lock:
+            return (
+                self._state in (NavState.ACTIVATION_PENDING, NavState.LAUNCH_PENDING)
+                or (self._state is NavState.WINDOW_SELECTION and self._resolving_windows)
+                or (
+                    self._state is NavState.QUICK_ASSIGN_APP
+                    and self._resolving_assign_apps
+                )
+            )
+
     # --- Configuration & runtime snapshot updates ---
 
     def set_trigger_interval_ms(self, interval_ms: int) -> None:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import os
 import queue
+import signal
 import threading
 import time
 from typing import Callable
@@ -81,8 +83,11 @@ class _MainThreadDispatcher(Cocoa.NSObject):
             fn()
             return
         self._queue.put(fn)
-        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "drainQueue:", None, False
+        self.performSelectorOnMainThread_withObject_waitUntilDone_modes_(
+            "drainQueue:",
+            None,
+            False,
+            [Cocoa.NSRunLoopCommonModes],
         )
 
     def drainQueue_(self, _arg) -> None:
@@ -124,6 +129,9 @@ class _PowerAndLockObserver(Cocoa.NSObject):
 
     def activeSpaceChanged_(self, _note) -> None:
         self._cb["on_space_change"]()
+
+    def signalPipeWake_(self, _note) -> None:
+        self._cb["on_signal_wake"]()
 
     def healthPulse_(self, _timer) -> None:
         self._cb["on_pulse"]()
@@ -189,13 +197,26 @@ class MacOSAppRuntime:
             on_toggle_mouse_selection=self._toggle_mouse_selection_from_menu,
         )
 
-        self._executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="AppJuggler-Worker"
+        # Separate latency-critical navigation pool from background Full Screen / scan tasks
+        # so multi-second Space/fullscreen animations can NEVER starve keyboard navigation.
+        self._nav_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="AppJuggler-Nav"
+        )
+        self._bg_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="AppJuggler-BG"
         )
         self._active_window_list_bundle: str | None = None
         self._duplicate_conflicts: frozenset[str] = frozenset()
         self._power_observer: _PowerAndLockObserver | None = None
         self._pulse_timer = None
+        self._shutting_down: bool = False
+        self._signal_shutdown_requested: bool = False
+        self._sig_pipe_r: int | None = None
+        self._sig_pipe_w: int | None = None
+        self._sig_file_handle = None
+        self._watchdog_lock = threading.Lock()
+        self._backend_wait_token: int = 0
+        self._backend_wait_deadline: float = 0.0
 
     def run(self) -> int:
         app = Cocoa.NSApplication.sharedApplication()
@@ -206,6 +227,7 @@ class MacOSAppRuntime:
         self._refresh_running_apps_snapshot()
         self._refresh_duplicate_conflicts_async()
         self._register_power_and_lock_observers()
+        self._install_unix_signal_handlers()
 
         status = self._ensure_input_tap_state()
         if self._store.load_error:
@@ -230,7 +252,7 @@ class MacOSAppRuntime:
 
         self._pulse_timer = (
             Cocoa.NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                0.6,
+                1.5,
                 self._power_observer,
                 "healthPulse:",
                 None,
@@ -243,20 +265,136 @@ class MacOSAppRuntime:
         return 0
 
     def shutdown_and_terminate(self) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
         logger.info("Shutting down AppJuggler")
         if self._pulse_timer is not None:
             self._pulse_timer.invalidate()
             self._pulse_timer = None
+        self._teardown_unix_signal_handlers()
         self._unregister_power_and_lock_observers()
         self._input_adapter.stop()
         self._app_registry.stop_observing()
         self._overlay.hide()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._nav_executor.shutdown(wait=False, cancel_futures=True)
+        self._bg_executor.shutdown(wait=False, cancel_futures=True)
         Cocoa.NSApp.terminate_(None)
+        # Post a harmless wakeup event so -[NSApplication run] exits immediately even when idle.
+        wake_ev = Cocoa.NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+            Cocoa.NSEventTypeApplicationDefined,
+            Cocoa.NSMakePoint(0.0, 0.0),
+            0,
+            0.0,
+            0,
+            None,
+            0,
+            0,
+            0,
+        )
+        if wake_ev is not None:
+            Cocoa.NSApp.postEvent_atStart_(wake_ev, True)
+
+    def _install_unix_signal_handlers(self) -> None:
+        """Hook SIGINT/SIGTERM via wakeup fd so Ctrl+C exits cleanly without OC_PythonException."""
+        try:
+            r_fd, w_fd = os.pipe()
+            os.set_blocking(r_fd, False)
+            os.set_blocking(w_fd, False)
+            self._sig_pipe_r = r_fd
+            self._sig_pipe_w = w_fd
+            signal.set_wakeup_fd(w_fd, warn_on_full_buffer=False)
+
+            def _on_unix_signal(_signum: int, _frame) -> None:
+                self._signal_shutdown_requested = True
+                if self._sig_pipe_w is not None:
+                    try:
+                        os.write(self._sig_pipe_w, b"\x01")
+                    except OSError:
+                        pass
+
+            signal.signal(signal.SIGINT, _on_unix_signal)
+            signal.signal(signal.SIGTERM, _on_unix_signal)
+
+            fh = Cocoa.NSFileHandle.alloc().initWithFileDescriptor_closeOnDealloc_(
+                r_fd, False
+            )
+            self._sig_file_handle = fh
+            Cocoa.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+                self._power_observer,
+                "signalPipeWake:",
+                Cocoa.NSFileHandleDataAvailableNotification,
+                fh,
+            )
+            fh.waitForDataInBackgroundAndNotifyForModes_([Cocoa.NSRunLoopCommonModes])
+        except Exception:
+            logger.debug("Could not install wakeup-fd signal handler", exc_info=True)
+
+    def _teardown_unix_signal_handlers(self) -> None:
+        try:
+            signal.set_wakeup_fd(-1)
+        except Exception:
+            pass
+        if self._sig_file_handle is not None and self._power_observer is not None:
+            try:
+                Cocoa.NSNotificationCenter.defaultCenter().removeObserver_name_object_(
+                    self._power_observer,
+                    Cocoa.NSFileHandleDataAvailableNotification,
+                    self._sig_file_handle,
+                )
+            except Exception:
+                pass
+            self._sig_file_handle = None
+        for fd_attr in ("_sig_pipe_r", "_sig_pipe_w"):
+            fd = getattr(self, fd_attr)
+            setattr(self, fd_attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def _on_signal_pipe_wake(self) -> None:
+        if self._sig_pipe_r is not None:
+            try:
+                while os.read(self._sig_pipe_r, 64):
+                    pass
+            except OSError:
+                pass
+        if self._signal_shutdown_requested:
+            self.shutdown_and_terminate()
+            return
+        if self._sig_file_handle is not None:
+            self._sig_file_handle.waitForDataInBackgroundAndNotifyForModes_(
+                [Cocoa.NSRunLoopCommonModes]
+            )
 
     # --- Event tap & State Machine plumbing ---
 
+    def _arm_backend_watchdog(self, op_token: int, timeout_sec: float) -> None:
+        with self._watchdog_lock:
+            self._backend_wait_token = op_token
+            self._backend_wait_deadline = time.monotonic() + timeout_sec
+
+    def _recover_if_backend_stalled(self) -> None:
+        if not self._controller.is_waiting_on_backend:
+            return
+        with self._watchdog_lock:
+            tok = self._backend_wait_token
+            deadline = self._backend_wait_deadline
+        if tok > 0 and self._controller.op_token == tok and time.monotonic() > deadline:
+            logger.warning(
+                "Backend operation op_token=%d exceeded watchdog deadline; releasing keyboard capture",
+                tok,
+            )
+            cmds = self._controller.handle_backend_event(
+                SystemInterruptEvent(reason="backend_watchdog_timeout")
+            )
+            if cmds:
+                self._dispatch_commands(cmds)
+
     def _on_hardware_key(self, event: HardwareKeyEvent) -> InputAction:
+        self._recover_if_backend_stalled()
         step = self._controller.handle_key_event(event)
         if step.commands:
             self._dispatch_commands(step.commands)
@@ -283,12 +421,19 @@ class MacOSAppRuntime:
     def _dispatch_commands(self, commands: tuple[NavCommand, ...]) -> None:
         for cmd in commands:
             if isinstance(cmd, InspectAppWindowsCommand):
-                self._executor.submit(self._task_inspect_windows, cmd.op_token, cmd.binding)
+                self._arm_backend_watchdog(cmd.op_token, timeout_sec=2.5)
+                self._nav_executor.submit(
+                    self._task_inspect_windows, cmd.op_token, cmd.binding
+                )
             elif isinstance(cmd, LaunchAppCommand):
+                self._arm_backend_watchdog(cmd.op_token, timeout_sec=10.0)
                 self._main.dispatch(lambda b=cmd.binding: self._overlay.show_launch_pending(b))
-                self._executor.submit(self._task_launch_app, cmd.op_token, cmd.binding)
+                self._nav_executor.submit(
+                    self._task_launch_app, cmd.op_token, cmd.binding
+                )
             elif isinstance(cmd, ActivateWindowCommand):
-                self._executor.submit(
+                self._arm_backend_watchdog(cmd.op_token, timeout_sec=2.5)
+                self._nav_executor.submit(
                     self._task_activate_window,
                     cmd.op_token,
                     cmd.binding,
@@ -296,14 +441,18 @@ class MacOSAppRuntime:
                     cmd.from_launch,
                 )
             elif isinstance(cmd, ActivateAppNoWindowsCommand):
-                self._executor.submit(
+                self._arm_backend_watchdog(cmd.op_token, timeout_sec=2.0)
+                self._nav_executor.submit(
                     self._task_activate_app_only,
                     cmd.op_token,
                     cmd.binding,
                     cmd.from_launch,
                 )
             elif isinstance(cmd, RequestOpenAppsForAssignCommand):
-                self._executor.submit(self._task_resolve_open_apps_for_assign, cmd.op_token)
+                self._arm_backend_watchdog(cmd.op_token, timeout_sec=3.0)
+                self._nav_executor.submit(
+                    self._task_resolve_open_apps_for_assign, cmd.op_token
+                )
             elif isinstance(cmd, CommitQuickAssignCommand):
                 self._main.dispatch(lambda c=cmd: self._execute_commit_quick_assign_on_main(c))
             elif isinstance(cmd, OpenFullAssignmentWindowCommand):
@@ -599,8 +748,8 @@ class MacOSAppRuntime:
                 error=outcome.error,
             )
         )
-        # Enforce Full Screen with cross-Space and cold-launch verification/retry
-        # without blocking keyboard input or double-triggering AppKit NSBeep().
+        # Enforce Full Screen on the background pool so navigation worker returns immediately
+        # and can never block subsequent Caps×2 jumps.
         if outcome.success and want_fullscreen and self._controller.op_token == op_token:
             if was_already_fullscreen and self._window_activator.is_window_currently_fullscreen(
                 slot.window, default_if_busy=True
@@ -611,13 +760,15 @@ class MacOSAppRuntime:
                 or slot.window.space_label == "Other Space"
                 or self._window_activator.did_space_change_since(started_switch - 0.10)
             )
-            self._window_activator.ensure_window_fullscreen(
-                slot.window,
-                is_cancelled=lambda: self._controller.op_token != op_token,
-                timeout_sec=3.2 if from_launch else (2.4 if crossed_space else 1.6),
-                allow_window_reacquire=from_launch,
-                crossed_space=crossed_space,
-                activation_started_at=started_switch,
+            target_win = slot.window
+            self._bg_executor.submit(
+                self._window_activator.ensure_window_fullscreen,
+                target_win,
+                lambda: self._controller.op_token != op_token,
+                3.2 if from_launch else (2.4 if crossed_space else 1.6),
+                from_launch,
+                crossed_space,
+                started_switch,
             )
 
     def _task_activate_app_only(
@@ -647,14 +798,15 @@ class MacOSAppRuntime:
         if outcome.success and want_fullscreen and self._controller.op_token == op_token:
             # Cold-launched apps (e.g. heavy Electron apps) or apps auto-opening a default
             # window upon activation may create their main window slightly after activation;
-            # watch briefly and switch that window into Full Screen once it appears.
+            # watch on the background pool without holding a navigation worker.
             wait_budget = 6.0 if from_launch else 0.9
-            self._await_launched_window_and_fullscreen(
-                op_token=op_token,
-                binding=binding,
-                timeout_sec=wait_budget,
-                leaving_fs_space=leaving_fs_space,
-                activation_started_at=started_switch,
+            self._bg_executor.submit(
+                self._await_launched_window_and_fullscreen,
+                op_token,
+                binding,
+                wait_budget,
+                leaving_fs_space,
+                started_switch,
             )
 
     def _await_launched_window_and_fullscreen(
@@ -759,7 +911,7 @@ class MacOSAppRuntime:
             )
             self._duplicate_conflicts = conflicts
 
-        self._executor.submit(_scan)
+        self._bg_executor.submit(_scan)
 
     def _sync_config_to_controller(self) -> None:
         trig = self._store.trigger
@@ -856,11 +1008,10 @@ class MacOSAppRuntime:
     ) -> None:
         st = status or self._permission_monitor.check_status(prompt=False)
         bound = {b.bundle_id for b in self._store.bindings}
-        unassigned = sum(
-            1
-            for r in self._app_registry.running_apps()
-            if r.bundle_id is None or r.bundle_id not in bound
-        )
+        # Use lightweight in-memory running_bundle_ids() rather than full LaunchServices /
+        # filesystem bundle URL resolution so main-thread status updates take < 0.1 ms.
+        running_bids = self._app_registry.running_bundle_ids()
+        unassigned = len(running_bids - bound)
         self._status_bar.update_status(
             st,
             unassigned_count=unassigned,
@@ -916,6 +1067,7 @@ class MacOSAppRuntime:
         self._ensure_input_tap_state()
 
     def _on_health_pulse(self) -> None:
+        self._recover_if_backend_stalled()
         if (
             self._controller.state is not NavState.ASSIGNMENT_EDITING
             and self._store.reload_if_modified()
@@ -927,7 +1079,7 @@ class MacOSAppRuntime:
             and self._active_window_list_bundle is not None
         ):
             bid = self._active_window_list_bundle
-            self._executor.submit(self._task_poll_active_window_list, bid)
+            self._bg_executor.submit(self._task_poll_active_window_list, bid)
 
     def _register_power_and_lock_observers(self) -> None:
         obs = _PowerAndLockObserver.alloc().initWithCallbacks_(
@@ -936,6 +1088,7 @@ class MacOSAppRuntime:
                 "on_wake": self._on_wake_or_unlock,
                 "on_lock": self._on_sleep_or_lock,
                 "on_space_change": self._window_activator.note_space_change,
+                "on_signal_wake": self._on_signal_pipe_wake,
                 "on_pulse": self._on_health_pulse,
             }
         )

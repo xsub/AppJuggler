@@ -645,3 +645,29 @@ def test_mouse_selection_disabled_by_default_and_hover_click_works_when_opted_in
     )
     assert isinstance(launched_cmds[0], ActivateWindowCommand)
     assert launched_cmds[0].from_launch is True
+
+
+def test_backend_wait_watchdog_releases_modal_capture() -> None:
+    ctrl = NavigationController(trigger_interval_ms=300)
+    ctrl.update_bindings([AppBinding("F", Layer.BASE, "com.apple.finder", "Finder")])
+    ctrl.update_running_apps({"com.apple.finder"})
+
+    assert ctrl.is_waiting_on_backend is False
+    ctrl.handle_key_event(_caps_event(100, caps_on=True))
+    ctrl.handle_key_event(_caps_event(180, caps_on=False))
+    assert ctrl.state is NavState.APP_SELECTION
+    assert ctrl.is_waiting_on_backend is False
+
+    # Selecting a running app enters WINDOW_SELECTION with _resolving_windows=True
+    ctrl.handle_key_event(_letter_event("F", 220))
+    assert ctrl.state is NavState.WINDOW_SELECTION
+    assert ctrl.is_waiting_on_backend is True
+
+    # Watchdog interrupt cleanly restores IDLE and passes normal typing through again
+    cmds = ctrl.handle_backend_event(
+        SystemInterruptEvent(reason="backend_watchdog_timeout")
+    )
+    assert ctrl.state is NavState.IDLE
+    assert ctrl.is_waiting_on_backend is False
+    assert any(isinstance(c, HideOverlayCommand) for c in cmds)
+    assert ctrl.handle_key_event(_letter_event("A", 300)).action is InputAction.PASS_THROUGH
