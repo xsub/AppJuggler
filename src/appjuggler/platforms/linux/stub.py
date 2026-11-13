@@ -150,13 +150,16 @@ class LinuxWindowActivator(WindowActivator):
         window: DiscoveredWindow,
         timeout_sec: float = 0.9,
         make_fullscreen: bool = False,
+        maximize_on_space: bool = False,
     ) -> ActivationOutcome:
         raise NotImplementedError("TODO(linux): Send _NET_ACTIVE_WINDOW / Wayland toplevel activate.")
 
     def activate_application_only(
         self,
         bundle_id: str,
-        timeout_sec: float = 0.6,
+        timeout_sec: float = 0.75,
+        bundle_path_hint: str | None = None,
+        leaving_fullscreen_space: bool = False,
     ) -> ActivationOutcome:
         raise NotImplementedError("TODO(linux): Activate running Linux application.")
 

@@ -16,6 +16,7 @@ from appjuggler.persistence.binding_store import (
     CorruptedConfigLockError,
     SlotConflictError,
 )
+from appjuggler.platforms.macos.animations import read_macos_animation_status
 from appjuggler.platforms.macos.ui import theme
 from appjuggler.platforms.macos.ui.overlay_panel import KeyboardMapGridView
 
@@ -53,11 +54,31 @@ class _RoundedCardView(Cocoa.NSView):
         theme.fill_round_rect(bounds, self._radius, self._bg_color, self._border_color, 1.0)
         if self._logo_image is not None:
             Cocoa.NSGraphicsContext.saveGraphicsState()
+            ctx = Cocoa.NSGraphicsContext.currentContext()
+            if ctx is not None:
+                ctx.setImageInterpolation_(Cocoa.NSImageInterpolationHigh)
             clip = Cocoa.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
                 bounds, self._radius, self._radius
             )
             clip.addClip()
-            img_rect = Cocoa.NSInsetRect(bounds, 5.0, 3.0)
+            pad_rect = Cocoa.NSInsetRect(bounds, 5.0, 2.5)
+            img_sz = self._logo_image.size()
+            iw = float(img_sz.width)
+            ih = float(img_sz.height)
+            pw = float(pad_rect.size.width)
+            ph = float(pad_rect.size.height)
+            if iw > 0.0 and ih > 0.0 and pw > 0.0 and ph > 0.0:
+                scale = min(pw / iw, ph / ih)
+                dw = iw * scale
+                dh = ih * scale
+                img_rect = Cocoa.NSMakeRect(
+                    float(pad_rect.origin.x) + (pw - dw) * 0.5,
+                    float(pad_rect.origin.y) + (ph - dh) * 0.5,
+                    dw,
+                    dh,
+                )
+            else:
+                img_rect = pad_rect
             self._logo_image.drawInRect_fromRect_operation_fraction_(
                 img_rect,
                 Cocoa.NSZeroRect,
@@ -65,6 +86,191 @@ class _RoundedCardView(Cocoa.NSView):
                 1.0,
             )
             Cocoa.NSGraphicsContext.restoreGraphicsState()
+
+
+class _HighQualityImageView(Cocoa.NSView):
+    """Draws an NSImage crisply with high interpolation and aspect-fit centering."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_HighQualityImageView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._image = None
+        return self
+
+    @objc.python_method
+    def set_image(self, image) -> None:
+        self._image = image
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, _dirty_rect) -> None:
+        if self._image is None:
+            return
+        bounds = self.bounds()
+        img_sz = self._image.size()
+        iw = float(img_sz.width)
+        ih = float(img_sz.height)
+        bw = float(bounds.size.width)
+        bh = float(bounds.size.height)
+        if iw <= 0.0 or ih <= 0.0 or bw <= 0.0 or bh <= 0.0:
+            return
+        scale = min(bw / iw, bh / ih)
+        dw = iw * scale
+        dh = ih * scale
+        dst = Cocoa.NSMakeRect(
+            float(bounds.origin.x) + (bw - dw) * 0.5,
+            float(bounds.origin.y) + (bh - dh) * 0.5,
+            dw,
+            dh,
+        )
+        Cocoa.NSGraphicsContext.saveGraphicsState()
+        ctx = Cocoa.NSGraphicsContext.currentContext()
+        if ctx is not None:
+            ctx.setImageInterpolation_(Cocoa.NSImageInterpolationHigh)
+        self._image.drawInRect_fromRect_operation_fraction_(
+            dst,
+            Cocoa.NSZeroRect,
+            Cocoa.NSCompositingOperationSourceOver,
+            1.0,
+        )
+        Cocoa.NSGraphicsContext.restoreGraphicsState()
+
+
+class _ClickToFocusTextField(Cocoa.NSTextField):
+    """Editable text field that refuses default/Tab focus and activates only when clicked."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_ClickToFocusTextField, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self.setRefusesFirstResponder_(True)
+        return self
+
+    def mouseDown_(self, event) -> None:
+        self.setRefusesFirstResponder_(False)
+        win = self.window()
+        if win is not None:
+            win.makeFirstResponder_(self)
+        objc.super(_ClickToFocusTextField, self).mouseDown_(event)
+
+    def textDidEndEditing_(self, notification) -> None:
+        objc.super(_ClickToFocusTextField, self).textDidEndEditing_(notification)
+        self.setRefusesFirstResponder_(True)
+
+
+class _EditorWindow(Cocoa.NSWindow):
+    """Assignment editor window that prevents accidental typing into numeric timing fields."""
+
+    def initWithContentRect_styleMask_backing_defer_(
+        self, content_rect, style_mask, backing, defer
+    ):
+        self = objc.super(
+            _EditorWindow, self
+        ).initWithContentRect_styleMask_backing_defer_(
+            content_rect, style_mask, backing, defer
+        )
+        if self is None:
+            return None
+        self._click_focus_field = None
+        self._on_key_char: Callable[[str], None] | None = None
+        return self
+
+    @objc.python_method
+    def configure_editor_input(
+        self,
+        *,
+        click_focus_field,
+        on_key_char: Callable[[str], None] | None = None,
+    ) -> None:
+        self._click_focus_field = click_focus_field
+        self._on_key_char = on_key_char
+
+    def sendEvent_(self, event) -> None:
+        if (
+            self._click_focus_field is not None
+            and isinstance(self.firstResponder(), Cocoa.NSTextView)
+            and int(event.type())
+            in (
+                int(Cocoa.NSEventTypeLeftMouseDown),
+                int(Cocoa.NSEventTypeRightMouseDown),
+                int(Cocoa.NSEventTypeOtherMouseDown),
+            )
+        ):
+            local_pt = self._click_focus_field.convertPoint_fromView_(
+                event.locationInWindow(), None
+            )
+            if not Cocoa.NSPointInRect(local_pt, self._click_focus_field.bounds()):
+                self.makeFirstResponder_(None)
+                self._click_focus_field.setRefusesFirstResponder_(True)
+        objc.super(_EditorWindow, self).sendEvent_(event)
+
+    def keyDown_(self, event) -> None:
+        if isinstance(self.firstResponder(), Cocoa.NSTextView):
+            objc.super(_EditorWindow, self).keyDown_(event)
+            return
+        if int(event.keyCode()) == 53:
+            self.close()
+            return
+        mods = int(event.modifierFlags())
+        disallowed = int(
+            Cocoa.NSEventModifierFlagCommand
+            | Cocoa.NSEventModifierFlagControl
+            | Cocoa.NSEventModifierFlagOption
+        )
+        if not (mods & disallowed) and self._on_key_char is not None:
+            chars = str(event.charactersIgnoringModifiers() or "").upper()
+            if len(chars) == 1 and "A" <= chars <= "Z":
+                self._on_key_char(chars)
+                return
+
+
+class _FullWidthCaptionView(Cocoa.NSView):
+    """Draws an uppercase caption tracked smoothly across the exact full width [0..width]."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_FullWidthCaptionView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._text: str = ""
+        self._font = theme.font_ui(10.5, bold=True)
+        self._color = Cocoa.NSColor.secondaryLabelColor()
+        return self
+
+    @objc.python_method
+    def configure(self, text: str, font=None, color=None) -> None:
+        self._text = text
+        if font is not None:
+            self._font = font
+        if color is not None:
+            self._color = color
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, _dirty_rect) -> None:
+        if not self._text:
+            return
+        bounds = self.bounds()
+        attrs = {
+            Cocoa.NSFontAttributeName: self._font,
+            Cocoa.NSForegroundColorAttributeName: self._color,
+        }
+        chars = list(self._text)
+        widths = [
+            float(Cocoa.NSString.stringWithString_(ch).sizeWithAttributes_(attrs).width)
+            for ch in chars
+        ]
+        total_w = float(bounds.size.width) - 1.0
+        sum_w = sum(widths)
+        gap = (total_w - sum_w) / max(1, len(chars) - 1) if len(chars) > 1 else 0.0
+        char_h = float(
+            Cocoa.NSString.stringWithString_("A").sizeWithAttributes_(attrs).height
+        )
+        y = (float(bounds.size.height) - char_h) / 2.0
+        x = 0.5
+        for ch, w in zip(chars, widths):
+            Cocoa.NSString.stringWithString_(ch).drawAtPoint_withAttributes_(
+                Cocoa.NSMakePoint(x, y), attrs
+            )
+            x += w + gap
 
 
 class _AssignmentWindowDelegate(Cocoa.NSObject):
@@ -89,6 +295,21 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
 
     def windowWillClose_(self, _notification) -> None:
         self._cb["on_close"]()
+
+    def appDidResignActive_(self, _notification) -> None:
+        self._cb["on_app_resign_active"]()
+
+    def control_textView_doCommandBySelector_(
+        self, _control, _text_view, command_selector
+    ) -> bool:
+        sel = str(command_selector)
+        if sel == "insertNewline:":
+            self._cb["on_save_interval"]()
+            return True
+        if sel == "cancelOperation:":
+            self._cb["on_cancel_interval_edit"]()
+            return True
+        return False
 
     def layerChanged_(self, sender) -> None:
         self._cb["on_layer_changed"](int(sender.selectedSegment()))
@@ -120,8 +341,14 @@ class _AssignmentWindowDelegate(Cocoa.NSObject):
     def autoFullscreenToggled_(self, _sender) -> None:
         self._cb["on_toggle_auto_fullscreen"]()
 
+    def autoMaximizeToggled_(self, _sender) -> None:
+        self._cb["on_toggle_auto_maximize"]()
+
     def mouseSelectionToggled_(self, _sender) -> None:
         self._cb["on_toggle_mouse_selection"]()
+
+    def openAnimationsClicked_(self, _sender) -> None:
+        self._cb["on_open_animations"]()
 
     def repairConfigClicked_(self, _sender) -> None:
         self._cb["on_repair_config"]()
@@ -141,6 +368,7 @@ class AssignmentEditorController:
         on_exit_editing: Callable[[], None],
         on_config_updated: Callable[[], None],
         on_quit_app: Callable[[], None] | None = None,
+        on_open_animations_window: Callable[[Cocoa.NSWindow | None], None] | None = None,
     ) -> None:
         self._store = store
         self._app_registry = app_registry
@@ -148,6 +376,7 @@ class AssignmentEditorController:
         self._on_exit_editing = on_exit_editing
         self._on_config_updated = on_config_updated
         self._on_quit_app = on_quit_app or (lambda: Cocoa.NSApp.terminate_(None))
+        self._on_open_animations_window = on_open_animations_window
 
         self._window: Cocoa.NSWindow | None = None
         self._delegate: _AssignmentWindowDelegate | None = None
@@ -168,8 +397,10 @@ class AssignmentEditorController:
         self._conflict_label = None
         self._interval_field = None
         self._auto_fullscreen_checkbox = None
+        self._auto_maximize_checkbox = None
         self._mouse_selection_checkbox = None
         self._caps_hold_checkbox = None
+        self._anim_status_label = None
         self._status_label = None
         self._repair_btn = None
 
@@ -183,9 +414,21 @@ class AssignmentEditorController:
             self._editing_active = False
             self._on_exit_editing()
 
+    def _defocus_interval_field(self) -> None:
+        if self._window is not None:
+            self._window.makeFirstResponder_(None)
+        if self._interval_field is not None:
+            self._interval_field.setRefusesFirstResponder_(True)
+
+    def _clear_transient_feedback(self) -> None:
+        if self._status_label is not None and not self._store.load_error:
+            self._status_label.setStringValue_("")
+
     def show_window(self) -> None:
         if self._window is None:
             self._build_window()
+        self._clear_transient_feedback()
+        self._defocus_interval_field()
         self.refresh_data()
         assert self._window is not None
         self._window.setCollectionBehavior_(
@@ -196,11 +439,14 @@ class AssignmentEditorController:
         self._mark_editing_active()
         Cocoa.NSApp.activateIgnoringOtherApps_(True)
         self._window.makeKeyAndOrderFront_(None)
+        self._defocus_interval_field()
 
     def close_if_open(self) -> None:
         if self._window is not None and self._window.isVisible():
             self._window.close()
         else:
+            self._clear_transient_feedback()
+            self._defocus_interval_field()
             self._mark_editing_inactive()
 
     def is_visible(self) -> bool:
@@ -209,14 +455,14 @@ class AssignmentEditorController:
     def _build_window(self) -> None:
         gw, gh = KeyboardMapGridView.required_size()
         win_w = gw + 40.0
-        win_h = gh + 362.0
+        win_h = gh + 470.0
         style = (
             Cocoa.NSWindowStyleMaskTitled
             | Cocoa.NSWindowStyleMaskClosable
             | Cocoa.NSWindowStyleMaskMiniaturizable
         )
-        win = Cocoa.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            Cocoa.NSMakeRect(160.0, 140.0, win_w, win_h),
+        win = _EditorWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            Cocoa.NSMakeRect(160.0, 120.0, win_w, win_h),
             style,
             Cocoa.NSBackingStoreBuffered,
             False,
@@ -224,17 +470,21 @@ class AssignmentEditorController:
         win.setTitle_("AppJuggler — Edit Assignments")
         win.setReleasedWhenClosed_(False)
         win.setHidesOnDeactivate_(False)
+        win.setAutorecalculatesKeyViewLoop_(False)
+        win.setInitialFirstResponder_(None)
         win.setLevel_(Cocoa.NSFloatingWindowLevel)
         win.setCollectionBehavior_(
             Cocoa.NSWindowCollectionBehaviorMoveToActiveSpace
             | Cocoa.NSWindowCollectionBehaviorFullScreenAuxiliary
         )
+        win.center()
 
         self._delegate = _AssignmentWindowDelegate.alloc().initWithCallbacks_(
             {
-                "on_focus": self._mark_editing_active,
-                "on_blur": self._mark_editing_inactive,
+                "on_focus": self._handle_focus,
+                "on_blur": self._handle_blur,
                 "on_close": self._handle_close,
+                "on_app_resign_active": self._handle_app_resign_active,
                 "on_layer_changed": self._handle_layer_changed,
                 "on_filter_changed": self._handle_filter_changed,
                 "on_app_selected": self._handle_app_selected,
@@ -243,19 +493,106 @@ class AssignmentEditorController:
                 "on_browse_app": self._handle_browse_app,
                 "on_refresh_apps": self.refresh_data,
                 "on_save_interval": self._handle_save_interval,
+                "on_cancel_interval_edit": self._handle_cancel_interval_edit,
                 "on_toggle_auto_fullscreen": self._handle_toggle_auto_fullscreen,
+                "on_toggle_auto_maximize": self._handle_toggle_auto_maximize,
                 "on_toggle_mouse_selection": self._handle_toggle_mouse_selection,
                 "on_toggle_caps_hold": self._handle_toggle_caps_hold,
+                "on_open_animations": self._handle_open_animations,
                 "on_repair_config": self._handle_repair_config,
                 "on_quit_app": self._on_quit_app,
             }
         )
         win.setDelegate_(self._delegate)
+        Cocoa.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._delegate,
+            "appDidResignActive:",
+            Cocoa.NSApplicationDidResignActiveNotification,
+            None,
+        )
 
         content = win.contentView()
 
-        # Top row: Layer switcher + instructions
-        top_y = win_h - 44.0
+        # --- Top Header: Left (AppJuggler Logo + Name + Subtitle) | Right (Quit + AI - Engineered By + Puffy Clouds) ---
+        col_w = 138.0
+        col_x = win_w - 20.0 - col_w
+        hdr_sep_y = win_h - 116.0
+        badge_y = hdr_sep_y + 12.0
+        badge_h = 42.0
+        caption_y = badge_y + badge_h + 4.0
+        quit_y = caption_y + 12.0
+
+        app_logo_img = self._load_app_icon()
+        app_logo_view = _HighQualityImageView.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(11.0, hdr_sep_y + 10.5, 88.0, 88.0)
+        )
+        app_logo_view.set_image(app_logo_img)
+        content.addSubview_(app_logo_view)
+
+        title_lbl = Cocoa.NSTextField.labelWithString_("AppJuggler")
+        title_lbl.setFont_(theme.font_ui(24.0, bold=True))
+        title_lbl.setTextColor_(Cocoa.NSColor.labelColor())
+        title_lbl.setFrame_(
+            Cocoa.NSMakeRect(104.0, hdr_sep_y + 55.0, col_x - 120.0, 30.0)
+        )
+        content.addSubview_(title_lbl)
+
+        subtitle_lbl = Cocoa.NSTextField.labelWithString_(
+            "Jump straight to any app or window from your keyboard."
+        )
+        subtitle_lbl.setFont_(theme.font_ui(13.5, bold=False))
+        subtitle_lbl.setTextColor_(Cocoa.NSColor.secondaryLabelColor())
+        subtitle_lbl.setFrame_(
+            Cocoa.NSMakeRect(105.0, hdr_sep_y + 30.0, col_x - 122.0, 20.0)
+        )
+        content.addSubview_(subtitle_lbl)
+
+        quit_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
+            "Quit AppJuggler", self._delegate, "quitAppClicked:"
+        )
+        quit_btn.setBezelStyle_(Cocoa.NSBezelStyleRounded)
+        # NSBezelStyleRounded insets its visible pill by 7pt horizontally on each side;
+        # expanding the frame by 7pt aligns the visible button edges 1:1 with col_x..col_x+col_w.
+        quit_btn.setFrame_(Cocoa.NSMakeRect(col_x - 7.0, quit_y, col_w + 14.0, 32.0))
+        content.addSubview_(quit_btn)
+
+        eng_lbl = _FullWidthCaptionView.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(col_x, caption_y, col_w, 15.0)
+        )
+        eng_lbl.configure(
+            "AI - ENGINEERED BY",
+            font=theme.font_ui(10.0, bold=True),
+            color=Cocoa.NSColor.secondaryLabelColor(),
+        )
+        content.addSubview_(eng_lbl)
+
+        logo_img = self._load_puffy_clouds_logo()
+        logo_card = _RoundedCardView.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(col_x, badge_y, col_w, badge_h)
+        )
+        logo_card.configure(
+            bg_color=Cocoa.NSColor.whiteColor(),
+            border_color=theme.rgba(148, 163, 184, 0.40),
+            radius=7.0,
+            logo_image=logo_img,
+        )
+        if logo_img is None:
+            fallback_lbl = Cocoa.NSTextField.labelWithString_("PUFFY CLOUDS")
+            fallback_lbl.setFont_(theme.font_ui(11.0, bold=True))
+            fallback_lbl.setTextColor_(Cocoa.NSColor.blackColor())
+            fallback_lbl.setAlignment_(Cocoa.NSTextAlignmentCenter)
+            fallback_lbl.setFrame_(Cocoa.NSMakeRect(4.0, 12.0, col_w - 8.0, 18.0))
+            logo_card.addSubview_(fallback_lbl)
+        content.addSubview_(logo_card)
+
+        hdr_sep = Cocoa.NSBox.alloc().initWithFrame_(
+            Cocoa.NSMakeRect(20.0, hdr_sep_y, win_w - 40.0, 1.0)
+        )
+        hdr_sep.setBoxType_(Cocoa.NSBoxSeparator)
+        content.addSubview_(hdr_sep)
+
+        # Layer switcher + instructions row
+        top_y = hdr_sep_y - 38.0
         lbl_layer = Cocoa.NSTextField.labelWithString_("Keyboard Layer:")
         lbl_layer.setFrame_(Cocoa.NSMakeRect(20.0, top_y + 2.0, 110.0, 22.0))
         lbl_layer.setFont_(theme.font_ui(13.0, bold=True))
@@ -273,14 +610,15 @@ class AssignmentEditorController:
         self._layer_seg = seg
 
         hint = Cocoa.NSTextField.labelWithString_(
-            "Click any key below to inspect or change its persistent application binding."
+            "Click or press A–Z to select any key slot · Esc closes"
         )
         hint.setFrame_(Cocoa.NSMakeRect(438.0, top_y + 2.0, win_w - 458.0, 22.0))
         hint.setTextColor_(Cocoa.NSColor.secondaryLabelColor())
+        hint.setAlignment_(Cocoa.NSTextAlignmentRight)
         content.addSubview_(hint)
 
         # Visual Keyboard Map (dark container frame)
-        map_y = win_h - 54.0 - gh
+        map_y = top_y - 10.0 - gh
         map_box = _RoundedCardView.alloc().initWithFrame_(
             Cocoa.NSMakeRect(20.0, map_y, gw, gh)
         )
@@ -364,12 +702,11 @@ class AssignmentEditorController:
             "Assign to Slot", self._delegate, "assignClicked:"
         )
         assign_btn.setBezelStyle_(Cocoa.NSBezelStyleRounded)
-        assign_btn.setKeyEquivalent_("\r")
         assign_btn.setFrame_(Cocoa.NSMakeRect(win_w - 186.0, row3_y, 166.0, 28.0))
         content.addSubview_(assign_btn)
 
         # Conflict / bundle metadata notice row
-        row4_y = row3_y - 28.0
+        row4_y = row3_y - 26.0
         conf_lbl = Cocoa.NSTextField.labelWithString_("")
         conf_lbl.setFrame_(Cocoa.NSMakeRect(114.0, row4_y, win_w - 134.0, 20.0))
         conf_lbl.setFont_(theme.font_ui(11.5, bold=False))
@@ -377,23 +714,39 @@ class AssignmentEditorController:
         content.addSubview_(conf_lbl)
         self._conflict_label = conf_lbl
 
-        # Horizontal divider separating binding editor from options & branding footer
+        # Horizontal divider separating binding editor from options & diagnostics footer
         sep = Cocoa.NSBox.alloc().initWithFrame_(
-            Cocoa.NSMakeRect(20.0, 128.0, win_w - 40.0, 1.0)
+            Cocoa.NSMakeRect(20.0, 146.0, win_w - 40.0, 1.0)
         )
         sep.setBoxType_(Cocoa.NSBoxSeparator)
         content.addSubview_(sep)
 
-        # Optional checkboxes (left) + Branding card (right)
-        opts_top_y = 88.0
-        opts_bot_y = 58.0
+        # Optional checkboxes + Animations button/status + Double-Caps timing
+        opts_top_y = 114.0
+        opts_bot_y = 86.0
+        anim_row_y = 48.0
+        row5_y = 12.0
+
+        max_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
+            "Instant Maximize (Same Space — 0 ms)",
+            self._delegate,
+            "autoMaximizeToggled:",
+        )
+        max_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_top_y, 304.0, 22.0))
+        max_chk.setState_(
+            Cocoa.NSControlStateValueOn
+            if self._store.auto_maximize_on_switch
+            else Cocoa.NSControlStateValueOff
+        )
+        content.addSubview_(max_chk)
+        self._auto_maximize_checkbox = max_chk
 
         fs_chk = Cocoa.NSButton.checkboxWithTitle_target_action_(
             "Switch Target Window to Full Screen",
             self._delegate,
             "autoFullscreenToggled:",
         )
-        fs_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_top_y, 276.0, 22.0))
+        fs_chk.setFrame_(Cocoa.NSMakeRect(340.0, opts_top_y, 290.0, 22.0))
         fs_chk.setState_(
             Cocoa.NSControlStateValueOn
             if self._store.auto_fullscreen_on_switch
@@ -407,7 +760,7 @@ class AssignmentEditorController:
             self._delegate,
             "mouseSelectionToggled:",
         )
-        mouse_chk.setFrame_(Cocoa.NSMakeRect(312.0, opts_top_y, 240.0, 22.0))
+        mouse_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_bot_y, 260.0, 22.0))
         mouse_chk.setState_(
             Cocoa.NSControlStateValueOn
             if self._store.enable_mouse_selection
@@ -421,7 +774,7 @@ class AssignmentEditorController:
             self._delegate,
             "capsHoldToggled:",
         )
-        hold_chk.setFrame_(Cocoa.NSMakeRect(22.0, opts_bot_y, 240.0, 22.0))
+        hold_chk.setFrame_(Cocoa.NSMakeRect(340.0, opts_bot_y, 260.0, 22.0))
         hold_chk.setState_(
             Cocoa.NSControlStateValueOn
             if self._store.trigger.enable_caps_hold_assign
@@ -430,48 +783,30 @@ class AssignmentEditorController:
         content.addSubview_(hold_chk)
         self._caps_hold_checkbox = hold_chk
 
-        # "AI ENGINEERED BY: [PUFFY CLOUDS]" branding badge (right-aligned in Edit Mode)
-        badge_w = 122.0
-        badge_h = 44.0
-        badge_x = win_w - 20.0 - badge_w
-        badge_y = 63.0
-
-        eng_lbl = Cocoa.NSTextField.labelWithString_("AI ENGINEERED BY:")
-        eng_lbl.setFont_(theme.font_ui(11.0, bold=True))
-        eng_lbl.setTextColor_(Cocoa.NSColor.secondaryLabelColor())
-        eng_lbl.setAlignment_(Cocoa.NSTextAlignmentRight)
-        eng_lbl.setFrame_(Cocoa.NSMakeRect(badge_x - 144.0, badge_y + 13.0, 136.0, 18.0))
-        content.addSubview_(eng_lbl)
-
-        logo_img = self._load_puffy_clouds_logo()
-        logo_card = _RoundedCardView.alloc().initWithFrame_(
-            Cocoa.NSMakeRect(badge_x, badge_y, badge_w, badge_h)
+        anim_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
+            "Disable Window Animations…",
+            self._delegate,
+            "openAnimationsClicked:",
         )
-        logo_card.configure(
-            bg_color=Cocoa.NSColor.whiteColor(),
-            border_color=theme.rgba(148, 163, 184, 0.40),
-            radius=7.0,
-            logo_image=logo_img,
-        )
-        if logo_img is None:
-            fallback_lbl = Cocoa.NSTextField.labelWithString_("PUFFY CLOUDS")
-            fallback_lbl.setFont_(theme.font_ui(11.0, bold=True))
-            fallback_lbl.setTextColor_(Cocoa.NSColor.blackColor())
-            fallback_lbl.setAlignment_(Cocoa.NSTextAlignmentCenter)
-            fallback_lbl.setFrame_(Cocoa.NSMakeRect(4.0, 12.0, badge_w - 8.0, 18.0))
-            logo_card.addSubview_(fallback_lbl)
-        content.addSubview_(logo_card)
+        anim_btn.setFrame_(Cocoa.NSMakeRect(20.0, anim_row_y, 224.0, 28.0))
+        content.addSubview_(anim_btn)
 
-        # Bottom row: Double-Caps trigger interval + status feedback + repair + quit
-        row5_y = 14.0
+        anim_lbl = Cocoa.NSTextField.labelWithString_("")
+        anim_lbl.setFont_(theme.font_ui(11.5, bold=False))
+        anim_lbl.setFrame_(Cocoa.NSMakeRect(252.0, anim_row_y + 4.0, win_w - 272.0, 20.0))
+        content.addSubview_(anim_lbl)
+        self._anim_status_label = anim_lbl
+
+        # Bottom row: Double-Caps trigger interval (click-only focus!) + status feedback + repair
         trig_lbl = Cocoa.NSTextField.labelWithString_("Double-Caps (ms):")
         trig_lbl.setFrame_(Cocoa.NSMakeRect(22.0, row5_y + 3.0, 124.0, 22.0))
         content.addSubview_(trig_lbl)
 
-        iv_field = Cocoa.NSTextField.alloc().initWithFrame_(
+        iv_field = _ClickToFocusTextField.alloc().initWithFrame_(
             Cocoa.NSMakeRect(148.0, row5_y + 2.0, 58.0, 24.0)
         )
         iv_field.setStringValue_(str(self._store.trigger.interval_ms))
+        iv_field.setDelegate_(self._delegate)
         content.addSubview_(iv_field)
         self._interval_field = iv_field
 
@@ -482,7 +817,7 @@ class AssignmentEditorController:
         content.addSubview_(iv_btn)
 
         status_lbl = Cocoa.NSTextField.labelWithString_("")
-        status_lbl.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, win_w - 480.0, 22.0))
+        status_lbl.setFrame_(Cocoa.NSMakeRect(322.0, row5_y + 3.0, win_w - 342.0, 22.0))
         status_lbl.setFont_(theme.font_ui(12.0, bold=True))
         content.addSubview_(status_lbl)
         self._status_label = status_lbl
@@ -490,17 +825,16 @@ class AssignmentEditorController:
         repair_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
             "Backup & Reset Damaged Config", self._delegate, "repairConfigClicked:"
         )
-        repair_btn.setFrame_(Cocoa.NSMakeRect(win_w - 368.0, row5_y, 210.0, 28.0))
+        repair_btn.setFrame_(Cocoa.NSMakeRect(win_w - 230.0, row5_y, 210.0, 28.0))
         repair_btn.setHidden_(True)
         content.addSubview_(repair_btn)
         self._repair_btn = repair_btn
 
-        quit_btn = Cocoa.NSButton.buttonWithTitle_target_action_(
-            "Quit AppJuggler", self._delegate, "quitAppClicked:"
+        win.configure_editor_input(
+            click_focus_field=iv_field,
+            on_key_char=self._handle_key_typed,
         )
-        quit_btn.setFrame_(Cocoa.NSMakeRect(win_w - 150.0, row5_y, 130.0, 28.0))
-        content.addSubview_(quit_btn)
-
+        win.makeFirstResponder_(None)
         self._window = win
 
     def refresh_data(self) -> None:
@@ -530,24 +864,7 @@ class AssignmentEditorController:
         )
 
         self._interval_field.setStringValue_(str(self._store.trigger.interval_ms))
-        if self._auto_fullscreen_checkbox is not None:
-            self._auto_fullscreen_checkbox.setState_(
-                Cocoa.NSControlStateValueOn
-                if self._store.auto_fullscreen_on_switch
-                else Cocoa.NSControlStateValueOff
-            )
-        if self._mouse_selection_checkbox is not None:
-            self._mouse_selection_checkbox.setState_(
-                Cocoa.NSControlStateValueOn
-                if self._store.enable_mouse_selection
-                else Cocoa.NSControlStateValueOff
-            )
-        if self._caps_hold_checkbox is not None:
-            self._caps_hold_checkbox.setState_(
-                Cocoa.NSControlStateValueOn
-                if self._store.trigger.enable_caps_hold_assign
-                else Cocoa.NSControlStateValueOff
-            )
+        self._sync_mode_checkboxes_and_anim_summary()
 
         if self._store.load_error:
             self._status_label.setStringValue_("Config file error — protected from overwrite")
@@ -619,7 +936,14 @@ class AssignmentEditorController:
         self._slot_summary_label.setStringValue_(text)
 
     def _handle_key_clicked(self, key_char: str) -> None:
+        self._defocus_interval_field()
         self._selected_key = key_char
+        self._update_slot_summary()
+
+    def _handle_key_typed(self, key_char: str) -> None:
+        self._selected_key = key_char
+        if self._grid_view is not None:
+            self._grid_view.set_selected_key(key_char)
         self._update_slot_summary()
 
     def _handle_layer_changed(self, seg_idx: int) -> None:
@@ -801,8 +1125,75 @@ class AssignmentEditorController:
         except (ValueError, Exception) as exc:
             self._set_feedback(f"Invalid interval: {exc}", is_error=True)
             return
+        self._defocus_interval_field()
         self._set_feedback(f"Saved double-Caps interval: {ms} ms", is_error=False)
         self._on_config_updated()
+
+    def _handle_cancel_interval_edit(self) -> None:
+        if self._interval_field is not None:
+            self._interval_field.setStringValue_(str(self._store.trigger.interval_ms))
+        self._defocus_interval_field()
+
+    def _handle_focus(self) -> None:
+        self._mark_editing_active()
+        if self._window is not None and not isinstance(
+            self._window.firstResponder(), Cocoa.NSTextView
+        ):
+            self._defocus_interval_field()
+        self._sync_mode_checkboxes_and_anim_summary()
+
+    def _handle_blur(self) -> None:
+        self._defocus_interval_field()
+        self._mark_editing_inactive()
+
+    def _handle_app_resign_active(self) -> None:
+        self._clear_transient_feedback()
+        self._defocus_interval_field()
+
+    def _sync_mode_checkboxes_and_anim_summary(self) -> None:
+        if self._auto_maximize_checkbox is not None:
+            self._auto_maximize_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.auto_maximize_on_switch
+                else Cocoa.NSControlStateValueOff
+            )
+        if self._auto_fullscreen_checkbox is not None:
+            self._auto_fullscreen_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.auto_fullscreen_on_switch
+                else Cocoa.NSControlStateValueOff
+            )
+        if self._mouse_selection_checkbox is not None:
+            self._mouse_selection_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.enable_mouse_selection
+                else Cocoa.NSControlStateValueOff
+            )
+        if self._caps_hold_checkbox is not None:
+            self._caps_hold_checkbox.setState_(
+                Cocoa.NSControlStateValueOn
+                if self._store.trigger.enable_caps_hold_assign
+                else Cocoa.NSControlStateValueOff
+            )
+        if self._anim_status_label is not None:
+            st = read_macos_animation_status()
+            if self._store.auto_fullscreen_on_switch:
+                self._anim_status_label.setStringValue_(
+                    "⚠ Native Full Screen creates Spaces (~500 ms slide/fade) — click for 0 ms guide"
+                )
+                self._anim_status_label.setTextColor_(Cocoa.NSColor.systemOrangeColor())
+            elif st.all_programmable_disabled:
+                self._anim_status_label.setStringValue_(
+                    "✓ macOS Window Animations Disabled · Same-Space 0 ms Switching Active"
+                )
+                self._anim_status_label.setTextColor_(Cocoa.NSColor.systemGreenColor())
+            else:
+                self._anim_status_label.setStringValue_(
+                    "Click to disable macOS window/Dock animations & view 0 ms Space guide"
+                )
+                self._anim_status_label.setTextColor_(
+                    Cocoa.NSColor.secondaryLabelColor()
+                )
 
     def _handle_toggle_auto_fullscreen(self) -> None:
         if self._auto_fullscreen_checkbox is None:
@@ -815,11 +1206,34 @@ class AssignmentEditorController:
         except Exception as exc:
             self._set_feedback(f"Could not save option: {exc}", is_error=True)
             return
-        state_txt = "enabled" if enabled else "disabled"
+        self._sync_mode_checkboxes_and_anim_summary()
+        state_txt = "enabled (creates Spaces)" if enabled else "disabled"
         self._set_feedback(
             f"Switch Target Window to Full Screen {state_txt}", is_error=False
         )
         self._on_config_updated()
+
+    def _handle_toggle_auto_maximize(self) -> None:
+        if self._auto_maximize_checkbox is None:
+            return
+        enabled = bool(
+            self._auto_maximize_checkbox.state() == Cocoa.NSControlStateValueOn
+        )
+        try:
+            self._store.set_auto_maximize_on_switch(enabled)
+        except Exception as exc:
+            self._set_feedback(f"Could not save option: {exc}", is_error=True)
+            return
+        self._sync_mode_checkboxes_and_anim_summary()
+        state_txt = "enabled" if enabled else "disabled"
+        self._set_feedback(
+            f"Instant Maximize (Same Space — 0 ms) {state_txt}", is_error=False
+        )
+        self._on_config_updated()
+
+    def _handle_open_animations(self) -> None:
+        if self._on_open_animations_window is not None:
+            self._on_open_animations_window(self._window)
 
     def _handle_toggle_mouse_selection(self) -> None:
         if self._mouse_selection_checkbox is None:
@@ -859,6 +1273,8 @@ class AssignmentEditorController:
         )
 
     def _handle_close(self) -> None:
+        self._clear_transient_feedback()
+        self._defocus_interval_field()
         self._mark_editing_inactive()
 
     def _set_feedback(self, msg: str, is_error: bool) -> None:
@@ -884,6 +1300,19 @@ class AssignmentEditorController:
         alert.addButtonWithTitle_("Replace Assignment")
         alert.addButtonWithTitle_("Cancel")
         return alert.runModal() == Cocoa.NSAlertFirstButtonReturn
+
+    @staticmethod
+    def _load_app_icon():
+        try:
+            raw = (
+                importlib.resources.files("appjuggler.assets")
+                .joinpath("app_icon.png")
+                .read_bytes()
+            )
+            ns_data = Cocoa.NSData.dataWithBytes_length_(raw, len(raw))
+            return Cocoa.NSImage.alloc().initWithData_(ns_data)
+        except Exception:
+            return None
 
     @staticmethod
     def _load_puffy_clouds_logo():

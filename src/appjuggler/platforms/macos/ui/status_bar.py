@@ -33,8 +33,14 @@ class _StatusMenuTarget(Cocoa.NSObject):
     def toggleAutoFullscreen_(self, _sender) -> None:
         self._cb["toggle_auto_fullscreen"]()
 
+    def toggleAutoMaximize_(self, _sender) -> None:
+        self._cb["toggle_auto_maximize"]()
+
     def toggleMouseSelection_(self, _sender) -> None:
         self._cb["toggle_mouse_selection"]()
+
+    def openAnimationsWindow_(self, _sender) -> None:
+        self._cb["open_animations"]()
 
     def quitApp_(self, _sender) -> None:
         self._cb["quit_app"]()
@@ -51,7 +57,9 @@ class StatusBarController:
         on_reload_config: Callable[[], None],
         on_quit: Callable[[], None],
         on_toggle_auto_fullscreen: Callable[[], None] | None = None,
+        on_toggle_auto_maximize: Callable[[], None] | None = None,
         on_toggle_mouse_selection: Callable[[], None] | None = None,
+        on_open_animations: Callable[[], None] | None = None,
     ) -> None:
         self._permission_monitor = permission_monitor
         self._target = _StatusMenuTarget.alloc().initWithCallbacks_(
@@ -61,7 +69,9 @@ class StatusBarController:
                 "show_permissions": self.show_permissions_dialog,
                 "reload_config": on_reload_config,
                 "toggle_auto_fullscreen": on_toggle_auto_fullscreen or (lambda: None),
+                "toggle_auto_maximize": on_toggle_auto_maximize or (lambda: None),
                 "toggle_mouse_selection": on_toggle_mouse_selection or (lambda: None),
+                "open_animations": on_open_animations or (lambda: None),
                 "quit_app": on_quit,
             }
         )
@@ -69,8 +79,9 @@ class StatusBarController:
         self._state_menu_item = None
         self._unassigned_menu_item = None
         self._auto_fs_menu_item = None
+        self._auto_max_menu_item = None
         self._mouse_sel_menu_item = None
-        self._last_rendered_snapshot: tuple[bool, bool, int, bool, bool] | None = None
+        self._last_rendered_snapshot: tuple[bool, bool, int, bool, bool, bool] | None = None
         self._last_icon_ready: bool | None = None
 
     def install(self) -> None:
@@ -115,6 +126,13 @@ class StatusBarController:
         edit_item.setTarget_(self._target)
         menu.addItem_(edit_item)
 
+        max_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Instant Maximize Target Window (0 ms)", "toggleAutoMaximize:", ""
+        )
+        max_item.setTarget_(self._target)
+        menu.addItem_(max_item)
+        self._auto_max_menu_item = max_item
+
         fs_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Switch Target Window to Full Screen", "toggleAutoFullscreen:", ""
         )
@@ -128,6 +146,12 @@ class StatusBarController:
         mouse_item.setTarget_(self._target)
         menu.addItem_(mouse_item)
         self._mouse_sel_menu_item = mouse_item
+
+        anim_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Disable Window Animations…", "openAnimationsWindow:", ""
+        )
+        anim_item.setTarget_(self._target)
+        menu.addItem_(anim_item)
 
         perm_item = Cocoa.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "Permissions & Diagnostics…", "showPermissions:", ""
@@ -170,6 +194,7 @@ class StatusBarController:
         perm_status: PermissionStatus,
         unassigned_count: int,
         auto_fullscreen: bool = False,
+        auto_maximize: bool = False,
         mouse_selection: bool = False,
     ) -> None:
         if self._status_item is None:
@@ -179,6 +204,7 @@ class StatusBarController:
             bool(perm_status.screen_locked),
             int(unassigned_count),
             bool(auto_fullscreen),
+            bool(auto_maximize),
             bool(mouse_selection),
         )
         if snap == self._last_rendered_snapshot:
@@ -189,6 +215,13 @@ class StatusBarController:
         if btn is not None and self._last_icon_ready != perm_status.is_ready:
             self._last_icon_ready = perm_status.is_ready
             self._apply_button_icon(btn, ready=perm_status.is_ready)
+
+        if self._auto_max_menu_item is not None:
+            self._auto_max_menu_item.setState_(
+                Cocoa.NSControlStateValueOn
+                if auto_maximize
+                else Cocoa.NSControlStateValueOff
+            )
 
         if self._auto_fs_menu_item is not None:
             self._auto_fs_menu_item.setState_(

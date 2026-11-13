@@ -1026,6 +1026,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
         panel.setOpaque_(False)
         panel.setBackgroundColor_(Cocoa.NSColor.clearColor())
         panel.setHasShadow_(True)
+        panel.setAnimationBehavior_(Cocoa.NSWindowAnimationBehaviorNone)
         panel.setIgnoresMouseEvents_(not self._mouse_enabled)
         panel.setAcceptsMouseMovedEvents_(self._mouse_enabled)
         panel.setLevel_(HUD_WINDOW_LEVEL)
@@ -1102,6 +1103,7 @@ class MacOSOverlayPresenter(OverlayPresenter):
 
     @staticmethod
     def _present_panel_front(panel: Cocoa.NSPanel) -> None:
+        panel.setAnimationBehavior_(Cocoa.NSWindowAnimationBehaviorNone)
         panel.setCollectionBehavior_(HUD_COLLECTION_BEHAVIOR)
         panel.setLevel_(HUD_WINDOW_LEVEL)
         panel.orderFrontRegardless()

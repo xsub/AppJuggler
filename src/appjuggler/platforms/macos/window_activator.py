@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import threading
 import time
 from typing import Callable
@@ -115,6 +116,7 @@ class MacOSWindowActivator(WindowActivator):
         window: DiscoveredWindow,
         timeout_sec: float = 0.9,
         make_fullscreen: bool = False,
+        maximize_on_space: bool = False,
     ) -> ActivationOutcome:
         started = time.monotonic()
         deadline = started + max(0.25, timeout_sec)
@@ -211,6 +213,12 @@ class MacOSWindowActivator(WindowActivator):
                         crossed_space=crossed,
                         activation_started_at=started,
                     )
+                elif maximize_on_space and not window.is_modal:
+                    self.ensure_window_maximized(
+                        window,
+                        timeout_sec=0.35,
+                        allow_window_reacquire=False,
+                    )
                 elapsed = (time.monotonic() - started) * 1000.0
                 logger.info(
                     "Activated window for bundle=%s in %.1f ms",
@@ -240,6 +248,12 @@ class MacOSWindowActivator(WindowActivator):
                     crossed_space=True,
                     activation_started_at=started,
                 )
+            elif maximize_on_space and not window.is_modal:
+                self.ensure_window_maximized(
+                    window,
+                    timeout_sec=0.35,
+                    allow_window_reacquire=False,
+                )
             logger.info(
                 "Activated app/window (Space transition in progress) bundle=%s in %.1f ms",
                 window.bundle_id,
@@ -254,16 +268,22 @@ class MacOSWindowActivator(WindowActivator):
         logger.warning("Window activation incomplete bundle=%s: %s", window.bundle_id, err_msg)
         return ActivationOutcome(success=False, error=err_msg, elapsed_ms=elapsed)
 
+    @staticmethod
+    def _shared_workspace():
+        return Cocoa.NSWorkspace.sharedWorkspace()
+
     def activate_application_only(
         self,
         bundle_id: str,
-        timeout_sec: float = 0.6,
+        timeout_sec: float = 0.75,
+        bundle_path_hint: str | None = None,
+        leaving_fullscreen_space: bool = False,
     ) -> ActivationOutcome:
-        """Activate a running windowless application without creating new documents (§2.5)."""
+        """Activate a running windowless application and surface its Menu Bar (§2.5)."""
         started = time.monotonic()
-        deadline = started + max(0.2, timeout_sec)
+        deadline = started + max(0.25, timeout_sec)
 
-        ws = Cocoa.NSWorkspace.sharedWorkspace()
+        ws = self._shared_workspace()
         apps = [
             a
             for a in ws.runningApplications()
@@ -276,23 +296,90 @@ class MacOSWindowActivator(WindowActivator):
                 elapsed_ms=(time.monotonic() - started) * 1000.0,
             )
 
+        apps.sort(
+            key=lambda a: (
+                0
+                if int(a.activationPolicy())
+                == int(Cocoa.NSApplicationActivationPolicyRegular)
+                else 1
+            )
+        )
         target = apps[0]
+        pid = int(target.processIdentifier())
+        ax_app = ApplicationServices.AXUIElementCreateApplication(pid)
+        ApplicationServices.AXUIElementSetMessagingTimeout(ax_app, 0.25)
+
         if target.isHidden():
             target.unhide()
+            ApplicationServices.AXUIElementSetAttributeValue(
+                ax_app, ApplicationServices.kAXHiddenAttribute, False
+            )
+
+        # 1. Privileged Accessibility frontmost focus + HIServices PSN frontmost + AppKit yield.
+        #    On macOS 14/15, `activateWithOptions_` alone from an inactive accessory HUD is
+        #    silently ignored by Cooperative Activation, whereas TCC Accessibility (`AXFrontmost`)
+        #    switches the active Menu Bar without forcing an unwanted `kAEReopenApplication` dialog.
+        last_ax_err = self._focus_app_frontmost_ax(ax_app, pid)
         self._activate_ns_running_app(target)
 
-        while time.monotonic() < deadline:
-            if target.isActive():
-                return ActivationOutcome(
-                    success=True,
-                    elapsed_ms=(time.monotonic() - started) * 1000.0,
-                )
-            time.sleep(0.025)
+        workspace_reopen_triggered = False
+        if leaving_fullscreen_space:
+            # Leaving another app's native Full Screen Space for a 0-window app requires
+            # LaunchServices activation so WindowServer swooshes back to the Desktop Space
+            # where the target app's Menu Bar is visible.
+            workspace_reopen_triggered = self._reopen_running_app_via_workspace(
+                target, bundle_id, bundle_path_hint
+            )
 
+        next_retry_at = started + 0.10
+
+        while time.monotonic() < deadline:
+            if self._is_app_frontmost(target, pid, bundle_id, ax_app):
+                self._focus_app_frontmost_ax(ax_app, pid)
+                elapsed = (time.monotonic() - started) * 1000.0
+                logger.info(
+                    "Activated application (no windows) for bundle=%s in %.1f ms",
+                    bundle_id,
+                    elapsed,
+                )
+                return ActivationOutcome(success=True, elapsed_ms=elapsed)
+
+            now = time.monotonic()
+            if now >= next_retry_at:
+                last_ax_err = self._focus_app_frontmost_ax(ax_app, pid)
+                self._activate_ns_running_app(target)
+                next_retry_at = now + 0.12
+
+            if not workspace_reopen_triggered and (now - started) >= 0.10:
+                workspace_reopen_triggered = True
+                self._reopen_running_app_via_workspace(
+                    target, bundle_id, bundle_path_hint
+                )
+
+            time.sleep(0.020)
+
+        elapsed = (time.monotonic() - started) * 1000.0
+        if self._is_app_frontmost(target, pid, bundle_id, ax_app):
+            logger.info(
+                "Activated application (no windows) for bundle=%s in %.1f ms",
+                bundle_id,
+                elapsed,
+            )
+            return ActivationOutcome(success=True, elapsed_ms=elapsed)
+
+        if last_ax_err == AX_ERROR_API_DISABLED:
+            err_msg = "Accessibility permission is disabled. Grant permission in System Settings."
+        else:
+            err_msg = f"Timed out activating '{bundle_id}'."
+        logger.warning(
+            "Windowless application activation incomplete bundle=%s: %s",
+            bundle_id,
+            err_msg,
+        )
         return ActivationOutcome(
-            success=bool(target.isActive()),
-            error=None if target.isActive() else f"Timed out activating '{bundle_id}'.",
-            elapsed_ms=(time.monotonic() - started) * 1000.0,
+            success=False,
+            error=err_msg,
+            elapsed_ms=elapsed,
         )
 
     @staticmethod
@@ -309,7 +396,85 @@ class MacOSWindowActivator(WindowActivator):
 
     @staticmethod
     def _activate_ns_running_app(running_app) -> None:
+        try:
+            ns_app = Cocoa.NSApplication.sharedApplication()
+            if ns_app is not None and hasattr(ns_app, "yieldActivationToApplication_"):
+                ns_app.yieldActivationToApplication_(running_app)
+        except Exception:
+            pass
         running_app.activateWithOptions_(Cocoa.NSApplicationActivateIgnoringOtherApps)
+
+    @staticmethod
+    def _focus_app_frontmost_ax(ax_app, pid: int) -> int:
+        err = int(
+            ApplicationServices.AXUIElementSetAttributeValue(
+                ax_app, ApplicationServices.kAXFrontmostAttribute, True
+            )
+        )
+        try:
+            err_psn, psn = ApplicationServices.GetProcessForPID(pid, None)
+            if err_psn == 0 and psn is not None:
+                ApplicationServices.SetFrontProcessWithOptions(psn, 1)
+        except Exception:
+            pass
+        return err
+
+    @classmethod
+    def _is_app_frontmost(cls, running_app, pid: int, bundle_id: str, ax_app) -> bool:
+        if running_app.isActive():
+            return True
+        try:
+            ws = cls._shared_workspace()
+            front = ws.frontmostApplication()
+            if front is not None and not front.isTerminated():
+                if (
+                    int(front.processIdentifier()) == pid
+                    or str(front.bundleIdentifier() or "") == bundle_id
+                ):
+                    return True
+        except Exception:
+            pass
+        if ax_app is not None:
+            err, is_front = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_app, ApplicationServices.kAXFrontmostAttribute, None
+            )
+            if err == AX_SUCCESS and bool(is_front):
+                return True
+        return False
+
+    @classmethod
+    def _reopen_running_app_via_workspace(
+        cls, running_app, bundle_id: str, bundle_path_hint: str | None = None
+    ) -> bool:
+        """Authoritative LaunchServices activation fallback for macOS 14/15 Cooperative Activation."""
+        try:
+            ws = cls._shared_workspace()
+            url = None
+            if hasattr(running_app, "bundleURL"):
+                url = running_app.bundleURL()
+            if url is None and bundle_path_hint and Path(bundle_path_hint).exists():
+                url = Cocoa.NSURL.fileURLWithPath_(bundle_path_hint)
+            if url is None:
+                url = ws.URLForApplicationWithBundleIdentifier_(bundle_id)
+            if url is None:
+                return False
+
+            cfg = Cocoa.NSWorkspaceOpenConfiguration.configuration()
+            cfg.setActivates_(True)
+            cfg.setAddsToRecentItems_(False)
+            cfg.setCreatesNewApplicationInstance_(False)
+            cfg.setPromptsUserIfNeeded_(False)
+            ws.openApplicationAtURL_configuration_completionHandler_(
+                url, cfg, lambda _app, _err: None
+            )
+            return True
+        except Exception:
+            logger.debug(
+                "Workspace reopen fallback failed for bundle=%s",
+                bundle_id,
+                exc_info=True,
+            )
+            return False
 
     @staticmethod
     def _raise_and_focus_ax(ax_app, ax_win) -> int:
@@ -326,6 +491,9 @@ class MacOSWindowActivator(WindowActivator):
             ApplicationServices.AXUIElementPerformAction(
                 ax_win, ApplicationServices.kAXRaiseAction
             )
+        )
+        ApplicationServices.AXUIElementSetAttributeValue(
+            ax_app, ApplicationServices.kAXFrontmostAttribute, True
         )
         return err
 
@@ -903,3 +1071,183 @@ class MacOSWindowActivator(WindowActivator):
         ApplicationServices.AXUIElementSetAttributeValue(
             ax_win, ApplicationServices.kAXSizeAttribute, v_sz
         )
+
+    def ensure_window_maximized(
+        self,
+        window: DiscoveredWindow,
+        is_cancelled: Callable[[], bool] | None = None,
+        timeout_sec: float = 0.8,
+        allow_window_reacquire: bool = False,
+    ) -> bool:
+        """Instantly fill visibleFrame on the current Desktop Space (<1 ms, zero Space animation)."""
+        if window.is_modal and not allow_window_reacquire:
+            return False
+
+        cancelled = is_cancelled or (lambda: False)
+        if cancelled():
+            return False
+
+        cur_win = window
+        deadline = time.monotonic() + max(0.15, timeout_sec)
+
+        while True:
+            if cancelled():
+                return False
+
+            ax_win = cur_win.native_handle
+            win_alive = ax_win is not None and self._window_registry.is_window_alive(cur_win)
+            err_role, raw_role = (
+                ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, ApplicationServices.kAXRoleAttribute, None
+                )
+                if win_alive
+                else (-1, None)
+            )
+            _, raw_subrole = (
+                ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, ApplicationServices.kAXSubroleAttribute, None
+                )
+                if win_alive
+                else (-1, None)
+            )
+            subrole = str(raw_subrole or "")
+            non_standard = (
+                not win_alive
+                or err_role != AX_SUCCESS
+                or str(raw_role or "") != "AXWindow"
+                or cur_win.is_modal
+                or subrole in ("AXSystemDialog", "AXSheet", "AXFloatingWindow", "AXUnknown")
+            )
+
+            if non_standard:
+                if not allow_window_reacquire or time.monotonic() >= deadline:
+                    return False
+                replacement = self._reacquire_standard_window(cur_win.bundle_id)
+                if replacement is None:
+                    time.sleep(0.10)
+                    continue
+                cur_win = replacement
+                continue
+
+            ApplicationServices.AXUIElementSetMessagingTimeout(ax_win, 0.25)
+            err_fs, cur_fs = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_win, "AXFullScreen", None
+            )
+            if err_fs == AX_SUCCESS and bool(cur_fs):
+                # Already in Native Full Screen Space; do not poke AXPosition/AXSize while fullscreen.
+                return True
+
+            win_rect = self._read_ax_rect(ax_win)
+            scr, primary_h = self._screen_for_ax_rect(win_rect)
+            if scr is None or primary_h <= 0.0:
+                return False
+
+            self._fill_screen_visible_frame(
+                ax_win, scr, primary_h, current_rect=win_rect
+            )
+            return True
+
+    def count_fullscreen_windows(self) -> int:
+        """Count currently open regular-app windows occupying macOS Native Full Screen Spaces."""
+        ws = Cocoa.NSWorkspace.sharedWorkspace()
+        seen_bids: set[str] = set()
+        total = 0
+        for app in ws.runningApplications():
+            if app.isTerminated():
+                continue
+            if int(app.activationPolicy()) != int(Cocoa.NSApplicationActivationPolicyRegular):
+                continue
+            bid = str(app.bundleIdentifier() or "")
+            if not bid or bid in seen_bids:
+                continue
+            seen_bids.add(bid)
+            for win in self._window_registry.discover_windows(bid, timeout_sec=0.25):
+                if win.is_fullscreen:
+                    total += 1
+        return total
+
+    def exit_fullscreen_on_open_apps(self) -> int:
+        """Exit Native Full Screen on all open regular-app windows and maximize them onto Desktop."""
+        ws = Cocoa.NSWorkspace.sharedWorkspace()
+        seen_bids: set[str] = set()
+        targets: list[DiscoveredWindow] = []
+        for app in ws.runningApplications():
+            if app.isTerminated():
+                continue
+            if int(app.activationPolicy()) != int(Cocoa.NSApplicationActivationPolicyRegular):
+                continue
+            bid = str(app.bundleIdentifier() or "")
+            if not bid or bid in seen_bids:
+                continue
+            seen_bids.add(bid)
+            for win in self._window_registry.discover_windows(bid, timeout_sec=0.30):
+                if win.is_fullscreen and win.native_handle is not None:
+                    targets.append(win)
+
+        converted = 0
+        for win in targets:
+            ax_win = win.native_handle
+            if ax_win is None or not self._window_registry.is_window_alive(win):
+                continue
+            ApplicationServices.AXUIElementSetMessagingTimeout(ax_win, 0.30)
+            err_fs, cur_fs = ApplicationServices.AXUIElementCopyAttributeValue(
+                ax_win, "AXFullScreen", None
+            )
+            if err_fs != AX_SUCCESS or not bool(cur_fs):
+                continue
+
+            triggered = False
+            err_set, is_settable = ApplicationServices.AXUIElementIsAttributeSettable(
+                ax_win, "AXFullScreen", None
+            )
+            if err_set == AX_SUCCESS and bool(is_settable):
+                if (
+                    int(
+                        ApplicationServices.AXUIElementSetAttributeValue(
+                            ax_win, "AXFullScreen", False
+                        )
+                    )
+                    == AX_SUCCESS
+                ):
+                    triggered = True
+
+            if not triggered:
+                err_btn, fs_btn = ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, ApplicationServices.kAXFullScreenButtonAttribute, None
+                )
+                if err_btn == AX_SUCCESS and fs_btn is not None:
+                    if (
+                        int(
+                            ApplicationServices.AXUIElementPerformAction(
+                                fs_btn, ApplicationServices.kAXPressAction
+                            )
+                        )
+                        == AX_SUCCESS
+                    ):
+                        triggered = True
+
+            if not triggered:
+                continue
+
+            wait_until = time.monotonic() + 1.25
+            exited = False
+            while time.monotonic() < wait_until:
+                err_now, fs_now = ApplicationServices.AXUIElementCopyAttributeValue(
+                    ax_win, "AXFullScreen", None
+                )
+                if err_now == AX_SUCCESS and not bool(fs_now):
+                    exited = True
+                    break
+                time.sleep(0.05)
+
+            if exited:
+                time.sleep(0.20)
+                win_rect = self._read_ax_rect(ax_win)
+                scr, primary_h = self._screen_for_ax_rect(win_rect)
+                if scr is not None and primary_h > 0.0:
+                    self._fill_screen_visible_frame(
+                        ax_win, scr, primary_h, current_rect=win_rect
+                    )
+                converted += 1
+
+        return converted

@@ -150,3 +150,26 @@ def test_reload_if_modified_detects_external_edits(tmp_path: Path) -> None:
     store.set_enable_mouse_selection(False)
     assert store.enable_mouse_selection is False
     assert "enable_mouse_selection" not in cfg_path.read_text(encoding="utf-8")
+
+    # Instant Maximize (auto_maximize_on_switch) and Native Full Screen are mutually exclusive
+    assert store.auto_maximize_on_switch is False
+    assert "auto_maximize_on_switch" not in cfg_path.read_text(encoding="utf-8")
+
+    store.set_auto_fullscreen_on_switch(True)
+    assert store.auto_fullscreen_on_switch is True
+    assert store.auto_maximize_on_switch is False
+
+    store.set_auto_maximize_on_switch(True)
+    assert store.auto_maximize_on_switch is True
+    assert store.auto_fullscreen_on_switch is False
+    assert '"auto_maximize_on_switch": true' in cfg_path.read_text(encoding="utf-8")
+    assert "auto_fullscreen_on_switch" not in cfg_path.read_text(encoding="utf-8")
+
+    reloaded_max = BindingStore(path=cfg_path, seed_defaults_if_missing=False)
+    assert reloaded_max.auto_maximize_on_switch is True
+    assert reloaded_max.auto_fullscreen_on_switch is False
+
+    # Enabling Native Full Screen again automatically clears Instant Maximize
+    reloaded_max.set_auto_fullscreen_on_switch(True)
+    assert reloaded_max.auto_fullscreen_on_switch is True
+    assert reloaded_max.auto_maximize_on_switch is False

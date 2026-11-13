@@ -873,11 +873,12 @@ class MacOSAppRuntime:
         want_fullscreen = self._store.auto_fullscreen_on_switch
         want_maximize = self._store.auto_maximize_on_switch and not want_fullscreen
         started_switch = time.monotonic()
-        leaving_fs_space = (
-            want_fullscreen and self._window_activator.is_frontmost_window_fullscreen()
-        )
+        leaving_fs_space = self._window_activator.is_frontmost_window_fullscreen()
         outcome = self._window_activator.activate_application_only(
-            binding.bundle_id, timeout_sec=0.6
+            binding.bundle_id,
+            timeout_sec=0.75,
+            bundle_path_hint=binding.bundle_path,
+            leaving_fullscreen_space=leaving_fs_space,
         )
         self._post_backend_event(
             ActivationCompleted(

@@ -44,6 +44,7 @@ class AppConfig:
     schema_version: int = SCHEMA_VERSION
     trigger: TriggerConfig = TriggerConfig()
     auto_fullscreen_on_switch: bool = False
+    auto_maximize_on_switch: bool = False
     enable_mouse_selection: bool = False
     bindings: tuple[AppBinding, ...] = ()
 
@@ -161,6 +162,16 @@ def parse_config_dict(raw: Any) -> AppConfig:
     if not isinstance(raw_auto_fs, bool):
         raise ConfigValidationError("'auto_fullscreen_on_switch' must be a boolean.")
 
+    raw_auto_max = raw.get(
+        "auto_maximize_on_switch",
+        raw_trigger.get("auto_maximize_on_switch", False),
+    )
+    if not isinstance(raw_auto_max, bool):
+        raise ConfigValidationError("'auto_maximize_on_switch' must be a boolean.")
+
+    if raw_auto_max and raw_auto_fs:
+        raw_auto_fs = False
+
     raw_mouse_sel = raw.get(
         "enable_mouse_selection",
         raw_trigger.get("enable_mouse_selection", False),
@@ -173,6 +184,7 @@ def parse_config_dict(raw: Any) -> AppConfig:
         schema_version=SCHEMA_VERSION,
         trigger=trigger,
         auto_fullscreen_on_switch=raw_auto_fs,
+        auto_maximize_on_switch=raw_auto_max,
         enable_mouse_selection=raw_mouse_sel,
         bindings=tuple(parsed_bindings),
     )
@@ -211,6 +223,8 @@ def serialize_config_dict(config: AppConfig) -> dict[str, Any]:
     }
     if config.auto_fullscreen_on_switch:
         out["auto_fullscreen_on_switch"] = True
+    if config.auto_maximize_on_switch:
+        out["auto_maximize_on_switch"] = True
     if config.enable_mouse_selection:
         out["enable_mouse_selection"] = True
     out["bindings"] = bindings_out
@@ -256,6 +270,11 @@ class BindingStore:
     def auto_fullscreen_on_switch(self) -> bool:
         with self._lock:
             return self._config.auto_fullscreen_on_switch
+
+    @property
+    def auto_maximize_on_switch(self) -> bool:
+        with self._lock:
+            return self._config.auto_maximize_on_switch
 
     @property
     def enable_mouse_selection(self) -> bool:
@@ -411,7 +430,30 @@ class BindingStore:
         """Update and persist whether activated target windows automatically enter Full Screen."""
         with self._lock:
             self._ensure_not_corrupted_locked()
-            new_cfg = replace(self._config, auto_fullscreen_on_switch=bool(enabled))
+            flag = bool(enabled)
+            new_cfg = replace(
+                self._config,
+                auto_fullscreen_on_switch=flag,
+                auto_maximize_on_switch=(
+                    False if flag else self._config.auto_maximize_on_switch
+                ),
+            )
+            self._write_atomic_locked(new_cfg)
+            self._config = new_cfg
+            return new_cfg
+
+    def set_auto_maximize_on_switch(self, enabled: bool) -> AppConfig:
+        """Update and persist whether activated target windows instantly fill visibleFrame on the same Space."""
+        with self._lock:
+            self._ensure_not_corrupted_locked()
+            flag = bool(enabled)
+            new_cfg = replace(
+                self._config,
+                auto_maximize_on_switch=flag,
+                auto_fullscreen_on_switch=(
+                    False if flag else self._config.auto_fullscreen_on_switch
+                ),
+            )
             self._write_atomic_locked(new_cfg)
             self._config = new_cfg
             return new_cfg

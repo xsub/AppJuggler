@@ -241,3 +241,282 @@ def test_refused_window_cached_to_prevent_repeated_beeps_and_pruned_on_exit(monk
     activator.prune_terminated_pid(50714)
     assert activator.ensure_window_fullscreen(win, timeout_sec=0.6) is False
     assert len(fs_attempts) == 2
+
+
+def test_ensure_window_maximized_resizes_on_same_space_without_fullscreen(monkeypatch) -> None:
+    import ApplicationServices
+    from appjuggler.platforms.macos import window_activator as wa
+    from appjuggler.platforms.macos.window_registry import AX_SUCCESS
+
+    win_handle = object()
+    filled_calls: list[tuple[object, float]] = []
+    fs_writes: list[object] = []
+
+    def fake_copy_attr(el, attr, _out):
+        if el is win_handle:
+            if attr == ApplicationServices.kAXRoleAttribute:
+                return (AX_SUCCESS, "AXWindow")
+            if attr == ApplicationServices.kAXSubroleAttribute:
+                return (AX_SUCCESS, "AXStandardWindow")
+            if attr == "AXFullScreen":
+                return (AX_SUCCESS, False)
+        return (-25212, None)
+
+    def fake_set_attr(el, attr, val):
+        if attr == "AXFullScreen":
+            fs_writes.append((el, val))
+        return AX_SUCCESS
+
+    class _StubScreen:
+        pass
+
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetMessagingTimeout", lambda *_: 0)
+    monkeypatch.setattr(ApplicationServices, "AXUIElementCopyAttributeValue", fake_copy_attr)
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetAttributeValue", fake_set_attr)
+
+    activator = wa.MacOSWindowActivator(_StubRegistry())
+    monkeypatch.setattr(activator, "_read_ax_rect", lambda *_: (40.0, 60.0, 900.0, 600.0))
+    monkeypatch.setattr(activator, "_screen_for_ax_rect", lambda *_: (_StubScreen(), 982.0))
+    monkeypatch.setattr(
+        activator,
+        "_fill_screen_visible_frame",
+        lambda ax_w, _scr, ph, current_rect=None: filled_calls.append((ax_w, ph)),
+    )
+
+    win = DiscoveredWindow(
+        window_id="50714:3",
+        bundle_id="org.mozilla.firefox",
+        pid=50714,
+        title="Firefox",
+        is_fullscreen=False,
+        native_handle=win_handle,
+    )
+
+    assert activator.ensure_window_maximized(win) is True
+    assert filled_calls == [(win_handle, 982.0)]
+    assert fs_writes == []
+
+
+def test_activate_application_only_focuses_menubar_via_ax_frontmost(monkeypatch) -> None:
+    import ApplicationServices
+    import Cocoa
+    from appjuggler.platforms.macos import window_activator as wa
+    from appjuggler.platforms.macos.window_registry import AX_SUCCESS
+
+    ax_app_handle = object()
+    frontmost_state = {"active": False}
+    ax_writes: list[tuple[object, str, object]] = []
+    workspace_opens: list[object] = []
+
+    class _WindowlessQTApp:
+        def isTerminated(self) -> bool:
+            return False
+
+        def bundleIdentifier(self) -> str:
+            return "com.apple.QuickTimePlayerX"
+
+        def activationPolicy(self) -> int:
+            return int(Cocoa.NSApplicationActivationPolicyRegular)
+
+        def processIdentifier(self) -> int:
+            return 47014
+
+        def isHidden(self) -> bool:
+            return True
+
+        def unhide(self) -> None:
+            pass
+
+        def isActive(self) -> bool:
+            return False  # Simulate macOS 15 blocking activateWithOptions_ alone
+
+        def activateWithOptions_(self, _opts: int) -> bool:
+            return False
+
+        def bundleURL(self):
+            return Cocoa.NSURL.fileURLWithPath_("/System/Applications/QuickTime Player.app")
+
+    class _FakeWorkspace:
+        def runningApplications(self):
+            return [_WindowlessQTApp()]
+
+        def frontmostApplication(self):
+            return None
+
+        def openApplicationAtURL_configuration_completionHandler_(self, url, _cfg, handler) -> None:
+            workspace_opens.append(url)
+            frontmost_state["active"] = True
+            handler(None, None)
+
+    monkeypatch.setattr(
+        wa.MacOSWindowActivator, "_shared_workspace", staticmethod(lambda: _FakeWorkspace())
+    )
+    monkeypatch.setattr(wa.MacOSWindowActivator, "_activate_ns_running_app", staticmethod(lambda app: app.activateWithOptions_(0)))
+    monkeypatch.setattr(ApplicationServices, "AXUIElementCreateApplication", lambda _pid: ax_app_handle)
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetMessagingTimeout", lambda *_: 0)
+    monkeypatch.setattr(ApplicationServices, "GetProcessForPID", lambda _pid, _out: (-1, None))
+
+    def fake_set_attr(el, attr, val):
+        ax_writes.append((el, attr, val))
+        if el is ax_app_handle and attr == ApplicationServices.kAXFrontmostAttribute and val is True:
+            frontmost_state["active"] = True
+        return AX_SUCCESS
+
+    def fake_copy_attr(el, attr, _out):
+        if el is ax_app_handle and attr == ApplicationServices.kAXFrontmostAttribute:
+            return (AX_SUCCESS, frontmost_state["active"])
+        return (-25212, None)
+
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetAttributeValue", fake_set_attr)
+    monkeypatch.setattr(ApplicationServices, "AXUIElementCopyAttributeValue", fake_copy_attr)
+
+    activator = wa.MacOSWindowActivator(_StubRegistry())
+    outcome = activator.activate_application_only("com.apple.QuickTimePlayerX", timeout_sec=0.5)
+
+    assert outcome.success is True
+    assert (ax_app_handle, ApplicationServices.kAXHiddenAttribute, False) in ax_writes
+    assert (ax_app_handle, ApplicationServices.kAXFrontmostAttribute, True) in ax_writes
+    assert workspace_opens == []
+
+
+def test_activate_application_only_falls_back_to_workspace_when_cooperative_activation_blocks(
+    monkeypatch,
+) -> None:
+    import ApplicationServices
+    import Cocoa
+    from appjuggler.platforms.macos import window_activator as wa
+    from appjuggler.platforms.macos.window_registry import AX_SUCCESS
+
+    ax_app_handle = object()
+    state = {"active": False}
+    workspace_opens: list[tuple[object, bool, bool]] = []
+
+    class _StubbornWindowlessApp:
+        def isTerminated(self) -> bool:
+            return False
+
+        def bundleIdentifier(self) -> str:
+            return "com.apple.QuickTimePlayerX"
+
+        def activationPolicy(self) -> int:
+            return int(Cocoa.NSApplicationActivationPolicyRegular)
+
+        def processIdentifier(self) -> int:
+            return 47014
+
+        def isHidden(self) -> bool:
+            return False
+
+        def isActive(self) -> bool:
+            return state["active"]
+
+        def activateWithOptions_(self, _opts: int) -> bool:
+            return False
+
+        def bundleURL(self):
+            return Cocoa.NSURL.fileURLWithPath_("/System/Applications/QuickTime Player.app")
+
+    class _FakeWorkspace:
+        def runningApplications(self):
+            return [_StubbornWindowlessApp()]
+
+        def frontmostApplication(self):
+            return _StubbornWindowlessApp() if state["active"] else None
+
+        def openApplicationAtURL_configuration_completionHandler_(self, url, cfg, handler) -> None:
+            workspace_opens.append((url, bool(cfg.activates()), bool(cfg.addsToRecentItems())))
+            state["active"] = True
+            handler(None, None)
+
+    monkeypatch.setattr(
+        wa.MacOSWindowActivator, "_shared_workspace", staticmethod(lambda: _FakeWorkspace())
+    )
+    monkeypatch.setattr(wa.MacOSWindowActivator, "_activate_ns_running_app", staticmethod(lambda app: app.activateWithOptions_(0)))
+    monkeypatch.setattr(ApplicationServices, "AXUIElementCreateApplication", lambda _pid: ax_app_handle)
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetMessagingTimeout", lambda *_: 0)
+    monkeypatch.setattr(ApplicationServices, "GetProcessForPID", lambda _pid, _out: (-1, None))
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetAttributeValue", lambda *_: AX_SUCCESS)
+    monkeypatch.setattr(
+        ApplicationServices,
+        "AXUIElementCopyAttributeValue",
+        lambda _el, _attr, _out: (AX_SUCCESS, state["active"]),
+    )
+
+    activator = wa.MacOSWindowActivator(_StubRegistry())
+    outcome = activator.activate_application_only("com.apple.QuickTimePlayerX", timeout_sec=0.6)
+
+    assert outcome.success is True
+    assert len(workspace_opens) == 1
+    assert workspace_opens[0][1] is True  # activates=True
+    assert workspace_opens[0][2] is False  # addsToRecentItems=False
+
+
+def test_activate_application_only_leaving_fullscreen_triggers_workspace_exit_immediately(
+    monkeypatch,
+) -> None:
+    import ApplicationServices
+    import Cocoa
+    from appjuggler.platforms.macos import window_activator as wa
+    from appjuggler.platforms.macos.window_registry import AX_SUCCESS
+
+    workspace_opens: list[object] = []
+
+    class _ActiveAfterOpenApp:
+        def isTerminated(self) -> bool:
+            return False
+
+        def bundleIdentifier(self) -> str:
+            return "com.apple.QuickTimePlayerX"
+
+        def activationPolicy(self) -> int:
+            return int(Cocoa.NSApplicationActivationPolicyRegular)
+
+        def processIdentifier(self) -> int:
+            return 47014
+
+        def isHidden(self) -> bool:
+            return False
+
+        def isActive(self) -> bool:
+            return True
+
+        def activateWithOptions_(self, _opts: int) -> bool:
+            return True
+
+        def bundleURL(self):
+            return Cocoa.NSURL.fileURLWithPath_("/System/Applications/QuickTime Player.app")
+
+    class _FakeWorkspace:
+        def runningApplications(self):
+            return [_ActiveAfterOpenApp()]
+
+        def frontmostApplication(self):
+            return _ActiveAfterOpenApp()
+
+        def openApplicationAtURL_configuration_completionHandler_(self, url, _cfg, handler) -> None:
+            workspace_opens.append(url)
+            handler(None, None)
+
+    monkeypatch.setattr(
+        wa.MacOSWindowActivator, "_shared_workspace", staticmethod(lambda: _FakeWorkspace())
+    )
+    monkeypatch.setattr(wa.MacOSWindowActivator, "_activate_ns_running_app", staticmethod(lambda app: app.activateWithOptions_(0)))
+    monkeypatch.setattr(ApplicationServices, "AXUIElementCreateApplication", lambda _pid: object())
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetMessagingTimeout", lambda *_: 0)
+    monkeypatch.setattr(ApplicationServices, "GetProcessForPID", lambda _pid, _out: (-1, None))
+    monkeypatch.setattr(ApplicationServices, "AXUIElementSetAttributeValue", lambda *_: AX_SUCCESS)
+    monkeypatch.setattr(
+        ApplicationServices,
+        "AXUIElementCopyAttributeValue",
+        lambda _el, _attr, _out: (AX_SUCCESS, True),
+    )
+
+    activator = wa.MacOSWindowActivator(_StubRegistry())
+    outcome = activator.activate_application_only(
+        "com.apple.QuickTimePlayerX",
+        timeout_sec=0.5,
+        leaving_fullscreen_space=True,
+    )
+
+    assert outcome.success is True
+    assert len(workspace_opens) == 1
