@@ -122,6 +122,9 @@ class _PowerAndLockObserver(Cocoa.NSObject):
     def screenUnlocked_(self, _note) -> None:
         self._cb["on_wake"]()
 
+    def activeSpaceChanged_(self, _note) -> None:
+        self._cb["on_space_change"]()
+
     def healthPulse_(self, _timer) -> None:
         self._cb["on_pulse"]()
 
@@ -545,6 +548,15 @@ class MacOSAppRuntime:
         self._hide_overlay_sync()
 
         want_fullscreen = self._store.auto_fullscreen_on_switch
+        started_switch = time.monotonic()
+        was_already_fullscreen = bool(slot.window.is_fullscreen) and not from_launch
+        leaving_fs_space = (
+            want_fullscreen
+            and not was_already_fullscreen
+            and self._window_activator.is_frontmost_window_fullscreen(
+                exclude_pid=slot.window.pid
+            )
+        )
         outcome = self._window_activator.activate_window(
             slot.window,
             timeout_sec=1.1 if from_launch else 0.9,
@@ -588,13 +600,24 @@ class MacOSAppRuntime:
             )
         )
         # Enforce Full Screen with cross-Space and cold-launch verification/retry
-        # without blocking keyboard input.
+        # without blocking keyboard input or double-triggering AppKit NSBeep().
         if outcome.success and want_fullscreen and self._controller.op_token == op_token:
+            if was_already_fullscreen and self._window_activator.is_window_currently_fullscreen(
+                slot.window, default_if_busy=True
+            ):
+                return
+            crossed_space = (
+                leaving_fs_space
+                or slot.window.space_label == "Other Space"
+                or self._window_activator.did_space_change_since(started_switch - 0.10)
+            )
             self._window_activator.ensure_window_fullscreen(
                 slot.window,
                 is_cancelled=lambda: self._controller.op_token != op_token,
-                timeout_sec=3.0 if from_launch else 1.6,
+                timeout_sec=3.2 if from_launch else (2.4 if crossed_space else 1.6),
                 allow_window_reacquire=from_launch,
+                crossed_space=crossed_space,
+                activation_started_at=started_switch,
             )
 
     def _task_activate_app_only(
@@ -607,6 +630,10 @@ class MacOSAppRuntime:
             return
         self._hide_overlay_sync()
         want_fullscreen = self._store.auto_fullscreen_on_switch
+        started_switch = time.monotonic()
+        leaving_fs_space = (
+            want_fullscreen and self._window_activator.is_frontmost_window_fullscreen()
+        )
         outcome = self._window_activator.activate_application_only(
             binding.bundle_id, timeout_sec=0.6
         )
@@ -626,6 +653,8 @@ class MacOSAppRuntime:
                 op_token=op_token,
                 binding=binding,
                 timeout_sec=wait_budget,
+                leaving_fs_space=leaving_fs_space,
+                activation_started_at=started_switch,
             )
 
     def _await_launched_window_and_fullscreen(
@@ -633,7 +662,10 @@ class MacOSAppRuntime:
         op_token: int,
         binding,
         timeout_sec: float,
+        leaving_fs_space: bool = False,
+        activation_started_at: float | None = None,
     ) -> None:
+        started_watch = activation_started_at if activation_started_at is not None else time.monotonic()
         deadline = time.monotonic() + max(0.3, timeout_sec)
         ws = Cocoa.NSWorkspace.sharedWorkspace()
         while time.monotonic() < deadline:
@@ -665,11 +697,18 @@ class MacOSAppRuntime:
                     timeout_sec=0.8,
                     make_fullscreen=False,
                 )
+                crossed = (
+                    leaving_fs_space
+                    or target.space_label == "Other Space"
+                    or self._window_activator.did_space_change_since(started_watch - 0.10)
+                )
                 self._window_activator.ensure_window_fullscreen(
                     target,
                     is_cancelled=lambda: self._controller.op_token != op_token,
                     timeout_sec=2.8,
                     allow_window_reacquire=True,
+                    crossed_space=crossed,
+                    activation_started_at=started_watch,
                 )
                 return
             time.sleep(0.14)
@@ -694,6 +733,7 @@ class MacOSAppRuntime:
     def _on_app_lifecycle(self, kind: str, bundle_id: str | None, pid: int) -> None:
         if kind == "terminate":
             self._window_registry.prune_terminated_pid(bundle_id, pid)
+            self._window_activator.prune_terminated_pid(pid)
             if bundle_id and not self._app_registry.is_bundle_running(bundle_id):
                 self._slot_table.clear_app(bundle_id)
 
@@ -895,6 +935,7 @@ class MacOSAppRuntime:
                 "on_sleep": self._on_sleep_or_lock,
                 "on_wake": self._on_wake_or_unlock,
                 "on_lock": self._on_sleep_or_lock,
+                "on_space_change": self._window_activator.note_space_change,
                 "on_pulse": self._on_health_pulse,
             }
         )
@@ -909,6 +950,12 @@ class MacOSAppRuntime:
             obs,
             "sessionResigned:",
             Cocoa.NSWorkspaceSessionDidResignActiveNotification,
+            None,
+        )
+        ws_nc.addObserver_selector_name_object_(
+            obs,
+            "activeSpaceChanged:",
+            Cocoa.NSWorkspaceActiveSpaceDidChangeNotification,
             None,
         )
 
