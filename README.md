@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/appjuggler/assets/app_icon.png" width="136" alt="AppJuggler Icon" />
+</p>
+
 # AppJuggler
 
 > **Jump straight to any app or window from your keyboard.**
@@ -75,7 +79,9 @@ open dist/AppJuggler.app
 ### 1. Edit Assignments Window (`Caps ×2 → ,` or Menu Bar Icon)
 - Open **`Edit Assignments…`** anytime from the keyboard by pressing **`Caps Lock ×2 → ,`** *(comma)*, or by clicking the compact keyboard icon in the macOS menu bar.
 - Switch between **Base Layer (`A–Z`)** and **Shift Layer (`⇧A–Z`)**, click any keycap on the visual keyboard map, select an app from **Unassigned Running Apps** / **All Running & Installed** / **Choose `.app`…**, and click **Assign to Slot**.
-- **Switch Target Window to Full Screen** *(optional checkbox)*: when checked (or `"auto_fullscreen_on_switch": true` in `config.json`), any non-modal target window AppJuggler switches to automatically enters macOS Full Screen (if not already in Full Screen).
+- **Instant Maximize (`Same Space — 0 ms`)** *(optional checkbox)*: when checked (or `"auto_maximize_on_switch": true` in `config.json`), any non-modal desktop window AppJuggler switches to instantly fills the screen (`visibleFrame`) via Accessibility API in `< 1 ms` **on the current Desktop Space** — avoiding macOS's cross-Space slide/fade animations completely.
+- **Switch Target Window to Full Screen** *(optional checkbox)*: when checked (or `"auto_fullscreen_on_switch": true` in `config.json`), any non-modal target window AppJuggler switches to automatically enters native macOS Full Screen *(note: macOS creates a separate Space per Full Screen window)*.
+- **Disable Window Animations…** *(button in `Edit Assignments…` & menu bar)*: opens a dedicated diagnostic & one-click helper window that disables programmable macOS AppKit window, Dock, Mission Control, and Finder animations (`defaults`), moves stuck Full Screen windows onto a single Desktop Space, and links directly to `System Settings → Accessibility → Display → Reduce motion`.
 - **Mouse Hover & Click in HUD** *(optional checkbox, disabled by default)*: when checked (or `"enable_mouse_selection": true` in `config.json`), you can also hover to highlight and click to select apps or windows directly in the HUD overlay (plus scroll wheel in multi-window lists and clicking the layer pill to toggle `Base` ↔ `Shift`). When unchecked, the HUD remains keyboard-only and completely click-through (`ignoresMouseEvents`).
 - Configuration is stored atomically at `~/Library/Application Support/AppJuggler/config.json` (macOS) or `~/.config/appjuggler/config.json` (Linux), and external edits to `config.json` are hot-reloaded automatically.
 

@@ -18,6 +18,7 @@ APP = ["src/appjuggler/__main__.py"]
 DATA_FILES = []
 OPTIONS = {
     "argv_emulation": False,
+    "iconfile": "src/appjuggler/assets/AppJuggler.icns",
     "packages": ["appjuggler"],
     "plist": {
         "CFBundleName": "AppJuggler",

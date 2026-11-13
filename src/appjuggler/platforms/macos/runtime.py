@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import importlib.resources
 import logging
 import os
 import queue
@@ -58,6 +59,7 @@ from appjuggler.persistence.binding_store import BindingStore, CorruptedConfigLo
 from appjuggler.platforms.macos.app_registry import MacOSApplicationRegistry
 from appjuggler.platforms.macos.input_tap import MacOSInputAdapter
 from appjuggler.platforms.macos.permissions import MacOSPermissionMonitor
+from appjuggler.platforms.macos.ui.animations_window import WindowAnimationsDialogController
 from appjuggler.platforms.macos.ui.assignment_window import AssignmentEditorController
 from appjuggler.platforms.macos.ui.overlay_panel import MacOSOverlayPresenter
 from appjuggler.platforms.macos.ui.status_bar import StatusBarController
@@ -179,6 +181,12 @@ class MacOSAppRuntime:
                 MouseScrollWindowSelection(delta=delta)
             ),
         )
+        self._animations_dialog = WindowAnimationsDialogController(
+            store=self._store,
+            on_config_updated=self._on_animations_or_config_updated,
+            count_fullscreen_windows=self._window_activator.count_fullscreen_windows,
+            exit_fullscreen_windows=self._window_activator.exit_fullscreen_on_open_apps,
+        )
         self._assignment_editor = AssignmentEditorController(
             store=self._store,
             app_registry=self._app_registry,
@@ -186,6 +194,7 @@ class MacOSAppRuntime:
             on_exit_editing=lambda: self._post_backend_event(ExitAssignmentEditing()),
             on_config_updated=self._sync_config_to_controller,
             on_quit_app=self.shutdown_and_terminate,
+            on_open_animations_window=self._animations_dialog.show_window,
         )
         self._status_bar = StatusBarController(
             permission_monitor=self._permission_monitor,
@@ -194,7 +203,9 @@ class MacOSAppRuntime:
             on_reload_config=self._reload_config_from_disk,
             on_quit=self.shutdown_and_terminate,
             on_toggle_auto_fullscreen=self._toggle_auto_fullscreen_from_menu,
+            on_toggle_auto_maximize=self._toggle_auto_maximize_from_menu,
             on_toggle_mouse_selection=self._toggle_mouse_selection_from_menu,
+            on_open_animations=lambda: self._animations_dialog.show_window(None),
         )
 
         # Separate latency-critical navigation pool from background Full Screen / scan tasks
@@ -223,6 +234,7 @@ class MacOSAppRuntime:
     def run(self) -> int:
         app = Cocoa.NSApplication.sharedApplication()
         app.setActivationPolicy_(Cocoa.NSApplicationActivationPolicyAccessory)
+        self._apply_application_icon(app)
 
         self._status_bar.install()
         self._app_registry.start_observing(self._on_app_lifecycle)
@@ -266,6 +278,21 @@ class MacOSAppRuntime:
         logger.info("AppJuggler running (config=%s)", self._store.path)
         app.run()
         return 0
+
+    @staticmethod
+    def _apply_application_icon(app) -> None:
+        try:
+            raw = (
+                importlib.resources.files("appjuggler.assets")
+                .joinpath("app_icon.png")
+                .read_bytes()
+            )
+            ns_data = Cocoa.NSData.dataWithBytes_length_(raw, len(raw))
+            icon = Cocoa.NSImage.alloc().initWithData_(ns_data)
+            if icon is not None:
+                app.setApplicationIconImage_(icon)
+        except Exception:
+            pass
 
     def shutdown_and_terminate(self) -> None:
         if self._shutting_down:
@@ -743,6 +770,7 @@ class MacOSAppRuntime:
         self._hide_overlay_sync()
 
         want_fullscreen = self._store.auto_fullscreen_on_switch
+        want_maximize = self._store.auto_maximize_on_switch and not want_fullscreen
         started_switch = time.monotonic()
         was_already_fullscreen = bool(slot.window.is_fullscreen) and not from_launch
         leaving_fs_space = (
@@ -756,6 +784,7 @@ class MacOSAppRuntime:
             slot.window,
             timeout_sec=1.1 if from_launch else 0.9,
             make_fullscreen=False,
+            maximize_on_space=(want_maximize and not from_launch),
         )
         if outcome.stale_window:
             discovered = self._window_registry.discover_windows(
@@ -770,6 +799,7 @@ class MacOSAppRuntime:
                     slot.window,
                     timeout_sec=0.9,
                     make_fullscreen=False,
+                    maximize_on_space=want_maximize,
                 )
             else:
                 self._post_backend_event(
@@ -816,6 +846,20 @@ class MacOSAppRuntime:
                 crossed_space,
                 started_switch,
             )
+        elif (
+            outcome.success
+            and want_maximize
+            and from_launch
+            and self._controller.op_token == op_token
+        ):
+            target_win = slot.window
+            self._bg_executor.submit(
+                self._window_activator.ensure_window_maximized,
+                target_win,
+                lambda: self._controller.op_token != op_token,
+                2.0,
+                True,
+            )
 
     def _task_activate_app_only(
         self,
@@ -827,6 +871,7 @@ class MacOSAppRuntime:
             return
         self._hide_overlay_sync()
         want_fullscreen = self._store.auto_fullscreen_on_switch
+        want_maximize = self._store.auto_maximize_on_switch and not want_fullscreen
         started_switch = time.monotonic()
         leaving_fs_space = (
             want_fullscreen and self._window_activator.is_frontmost_window_fullscreen()
@@ -841,7 +886,11 @@ class MacOSAppRuntime:
                 error=outcome.error,
             )
         )
-        if outcome.success and want_fullscreen and self._controller.op_token == op_token:
+        if (
+            outcome.success
+            and (want_fullscreen or want_maximize)
+            and self._controller.op_token == op_token
+        ):
             # Cold-launched apps (e.g. heavy Electron apps) or apps auto-opening a default
             # window upon activation may create their main window slightly after activation;
             # watch on the background pool without holding a navigation worker.
@@ -869,7 +918,9 @@ class MacOSAppRuntime:
         while time.monotonic() < deadline:
             if self._controller.op_token != op_token:
                 return
-            if not self._store.auto_fullscreen_on_switch:
+            want_fs = self._store.auto_fullscreen_on_switch
+            want_max = self._store.auto_maximize_on_switch and not want_fs
+            if not (want_fs or want_max):
                 return
             front = ws.frontmostApplication()
             if front is not None and front.bundleIdentifier():
@@ -894,20 +945,29 @@ class MacOSAppRuntime:
                     target,
                     timeout_sec=0.8,
                     make_fullscreen=False,
+                    maximize_on_space=want_max,
                 )
-                crossed = (
-                    leaving_fs_space
-                    or target.space_label == "Other Space"
-                    or self._window_activator.did_space_change_since(started_watch - 0.10)
-                )
-                self._window_activator.ensure_window_fullscreen(
-                    target,
-                    is_cancelled=lambda: self._controller.op_token != op_token,
-                    timeout_sec=2.8,
-                    allow_window_reacquire=True,
-                    crossed_space=crossed,
-                    activation_started_at=started_watch,
-                )
+                if want_fs:
+                    crossed = (
+                        leaving_fs_space
+                        or target.space_label == "Other Space"
+                        or self._window_activator.did_space_change_since(started_watch - 0.10)
+                    )
+                    self._window_activator.ensure_window_fullscreen(
+                        target,
+                        is_cancelled=lambda: self._controller.op_token != op_token,
+                        timeout_sec=2.8,
+                        allow_window_reacquire=True,
+                        crossed_space=crossed,
+                        activation_started_at=started_watch,
+                    )
+                elif want_max:
+                    self._window_activator.ensure_window_maximized(
+                        target,
+                        is_cancelled=lambda: self._controller.op_token != op_token,
+                        timeout_sec=1.6,
+                        allow_window_reacquire=True,
+                    )
                 return
             time.sleep(0.14)
 
@@ -1051,8 +1111,14 @@ class MacOSAppRuntime:
             st,
             unassigned_count=unassigned,
             auto_fullscreen=self._store.auto_fullscreen_on_switch,
+            auto_maximize=self._store.auto_maximize_on_switch,
             mouse_selection=self._store.enable_mouse_selection,
         )
+
+    def _on_animations_or_config_updated(self) -> None:
+        self._sync_config_to_controller()
+        if self._assignment_editor.is_visible():
+            self._assignment_editor.refresh_data()
 
     def _toggle_auto_fullscreen_from_menu(self) -> None:
         new_val = not self._store.auto_fullscreen_on_switch
@@ -1064,6 +1130,21 @@ class MacOSAppRuntime:
         self._sync_config_to_controller()
         if self._assignment_editor.is_visible():
             self._assignment_editor.refresh_data()
+        if self._animations_dialog.is_visible():
+            self._animations_dialog.refresh_status()
+
+    def _toggle_auto_maximize_from_menu(self) -> None:
+        new_val = not self._store.auto_maximize_on_switch
+        try:
+            self._store.set_auto_maximize_on_switch(new_val)
+        except Exception:
+            logger.exception("Failed toggling auto_maximize_on_switch")
+            return
+        self._sync_config_to_controller()
+        if self._assignment_editor.is_visible():
+            self._assignment_editor.refresh_data()
+        if self._animations_dialog.is_visible():
+            self._animations_dialog.refresh_status()
 
     def _toggle_mouse_selection_from_menu(self) -> None:
         new_val = not self._store.enable_mouse_selection
