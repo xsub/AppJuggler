@@ -15,7 +15,8 @@ from pathlib import Path
 
 from appjuggler import APP_BUNDLE_ID
 
-# Fixed number after the name; window and HUD titles show it slightly greyed.
+# Fixed number after the name; the Edit Assignments header shows it slightly greyed.
+# The HUD title stays plain "AppJuggler" to keep that screen uncluttered.
 PRODUCT_NUMBER = "1.9"
 PRODUCT_NAME = f"AppJuggler {PRODUCT_NUMBER}"
 COPYRIGHT = "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License"
