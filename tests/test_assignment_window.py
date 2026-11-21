@@ -481,7 +481,7 @@ def test_version_links_sit_under_the_subtitle_and_open_their_pages(tmp_path: Pat
     links = [v for v in subviews if isinstance(v, _LinkButton)]
     assert [str(v.attributedTitle().string()) for v in links] == [
         "Source code: https://github.com/xsub/AppJuggler",
-        "Native version: https://PuffyClouds.Works/AppJuggler2",
+        "Native version: https://PuffyClouds.Works/AppJuggler",
     ]
 
     # One row under the subtitle, inside the header, left of the branding column.
@@ -499,5 +499,5 @@ def test_version_links_sit_under_the_subtitle_and_open_their_pages(tmp_path: Pat
         link.performClick_(None)
     assert opened == [
         "https://github.com/xsub/AppJuggler",
-        "https://PuffyClouds.Works/AppJuggler2",
+        "https://PuffyClouds.Works/AppJuggler",
     ]
