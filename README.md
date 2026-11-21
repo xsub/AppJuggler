@@ -1,3 +1,9 @@
+> [!TIP]
+> **AppJuggler 2 is out** — a native Swift rewrite for macOS 13+: a 4 MB download, Developer ID signed and notarized by Apple, with a 14-day free trial. Your 1.x assignments carry over.
+> → [appjuggler.puffyclouds.works](https://appjuggler.puffyclouds.works/?utm_source=github&utm_medium=referral&utm_campaign=launch&utm_content=readme_1x)
+>
+> AppJuggler 1.x, this repository, stays free and open source (MIT).
+
 <p align="center">
   <img src="src/appjuggler/assets/app_icon.png" width="136" alt="AppJuggler Icon" />
 </p>

@@ -21,7 +21,7 @@ PRODUCT_NUMBER = "1.9"
 PRODUCT_NAME = f"AppJuggler {PRODUCT_NUMBER}"
 COPYRIGHT = "(c) 2026 Pawel Suchanecki and AppJuggler Contributors · MIT License"
 SOURCE_URL = "https://github.com/xsub/AppJuggler"
-NATIVE_VERSION_URL = "https://PuffyClouds.Works/AppJuggler2"
+NATIVE_VERSION_URL = "https://PuffyClouds.Works/AppJuggler"
 # Info.plist key holding the build commit (the same key AppJuggler 2 uses).
 BUILD_COMMIT_KEY = "AJBuildCommit"
 
